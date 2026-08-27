@@ -1,0 +1,71 @@
+:root {
+  font-family: "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, sans-serif;
+  color: #17233d;
+  background: #f3f6fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --yibo-navy: #0d1f3c;
+  --yibo-blue: #2f6feb;
+  --yibo-cyan: #21a3b8;
+  --yibo-border: #e5eaf2;
+  --yibo-muted: #6e7b91;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.page-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 22px;
+}
+
+.page-heading h1 {
+  margin: 0 0 7px;
+  color: #13203a;
+  font-size: 25px;
+  line-height: 1.25;
+}
+
+.page-heading p {
+  margin: 0;
+  color: var(--yibo-muted);
+  font-size: 14px;
+}
+
+.surface-card {
+  border: 1px solid var(--yibo-border);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(28, 52, 88, 0.04);
+}
+
+@media (max-width: 720px) {
+  .page-heading {
+    flex-direction: column;
+  }
+}
