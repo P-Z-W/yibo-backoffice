@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Lock, Right, User } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
@@ -11,9 +11,10 @@ const router = useRouter()
 const auth = useAuthStore()
 const formRef = ref<FormInstance>()
 const submitting = ref(false)
-const form = reactive({ username: 'admin', password: '' })
+const lastLoginNameKey = 'yibo_last_login_name'
+const form = reactive({ username: localStorage.getItem(lastLoginNameKey) || '', password: '' })
 const rules: FormRules = {
-  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+  username: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }
 
@@ -24,10 +25,28 @@ async function submit() {
   submitting.value = true
   try {
     await auth.login(form.username.trim(), form.password)
+    localStorage.setItem(lastLoginNameKey, form.username.trim())
     const target = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
+    if (auth.mustChangePassword) {
+      try {
+        await ElMessageBox.confirm(
+          '您仍在使用默认密码。现在修改更安全，也可以暂时跳过，下次登录系统会继续提醒。',
+          '修改密码提醒',
+          {
+            type: 'warning',
+            confirmButtonText: '立即修改',
+            cancelButtonText: '暂时跳过',
+          },
+        )
+        await router.replace('/change-password')
+      } catch {
+        await router.replace(target)
+      }
+      return
+    }
     await router.replace(target)
   } catch {
-    ElMessage.error('用户名或密码不正确')
+    ElMessage.error('姓名或密码不正确')
   } finally {
     submitting.value = false
   }
@@ -64,8 +83,8 @@ async function submit() {
         </div>
 
         <ElForm ref="formRef" :model="form" :rules="rules" label-position="top" @keyup.enter="submit">
-          <ElFormItem label="用户名" prop="username">
-            <ElInput v-model="form.username" :prefix-icon="User" size="large" autocomplete="username" />
+          <ElFormItem label="姓名" prop="username">
+            <ElInput v-model="form.username" :prefix-icon="User" size="large" autocomplete="username" placeholder="请输入姓名" />
           </ElFormItem>
           <ElFormItem label="密码" prop="password">
             <ElInput

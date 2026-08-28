@@ -1,118 +1,135 @@
 <script setup lang="ts">
-import { Download, Search } from '@element-plus/icons-vue'
-import { BarChart, PieChart } from 'echarts/charts'
+import { Download, Refresh, Search } from '@element-plus/icons-vue'
+import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { computed, onMounted, ref, watch } from 'vue'
 import VChart from 'vue-echarts'
 import { useRoute } from 'vue-router'
-import { getExpressOverview, getExpressStats, type ExpressStats } from '../../api/express'
-import { http } from '../../api/http'
-import { formatCount } from '../../utils/format'
+import {
+  getExpressOverview,
+  getExpressPreview,
+  getExpressStats,
+  getUnmatchedSummary,
+  type ExpressOverview,
+  type ExpressPreview,
+  type ExpressStats,
+  type TeamSummary,
+  type UnmatchedSummary,
+} from '../../api/express'
+import { useAuthStore } from '../../stores/auth'
 
-use([CanvasRenderer, BarChart, PieChart, GridComponent, LegendComponent, TooltipComponent])
+use([CanvasRenderer, BarChart, LineChart, PieChart, GridComponent, LegendComponent, TooltipComponent])
 
 const route = useRoute()
+const auth = useAuthStore()
+const overview = ref<ExpressOverview>()
 const months = ref<string[]>([])
 const month = ref('')
 const stats = ref<ExpressStats>()
+const unmatched = ref<UnmatchedSummary>()
+const preview = ref<ExpressPreview>()
 const loading = ref(false)
 const previewLoading = ref(false)
-const preview = ref<{ rows: Record<string, unknown>[]; total: number; page: number; total_pages: number }>()
+const filter = ref('all')
 const keyword = ref('')
+const size = ref(100)
+const money = (value?: number) => (value ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const teamRowClass = ({ row }: { row: TeamSummary }) => row.team === '合计' ? 'total-row' : ''
 
-const teamChart = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  grid: { top: 15, right: 26, bottom: 28, left: 100 },
-  xAxis: { type: 'value', axisLabel: { color: '#8792a5' }, splitLine: { lineStyle: { color: '#edf1f6' } } },
-  yAxis: { type: 'category', data: [...(stats.value?.team_stats.slice(0, 10) ?? [])].reverse().map((item) => item.team), axisLabel: { color: '#66748a', width: 85, overflow: 'truncate' } },
-  series: [{ type: 'bar', data: [...(stats.value?.team_stats.slice(0, 10) ?? [])].reverse().map((item) => item.amount), barWidth: 12, itemStyle: { color: '#2f6feb', borderRadius: [0, 5, 5, 0] } }],
+const trendOption = computed(() => ({
+  tooltip: { trigger: 'axis' }, grid: { top: 16, right: 20, bottom: 28, left: 62 },
+  xAxis: { type: 'category', boundaryGap: false, data: overview.value?.trend.map((item) => item.month) ?? [], axisLabel: { color: '#8c94a6' } },
+  yAxis: { type: 'value', axisLabel: { color: '#8c94a6' }, splitLine: { lineStyle: { color: '#eef0f4' } } },
+  series: [{ type: 'line', smooth: true, data: overview.value?.trend.map((item) => item.amount) ?? [], lineStyle: { color: '#2563eb', width: 2 }, itemStyle: { color: '#2563eb' }, areaStyle: { color: 'rgba(37,99,235,.07)' } }],
 }))
-
-const expressChart = computed(() => ({
-  tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-  legend: { bottom: 0, textStyle: { color: '#78859a', fontSize: 11 } },
-  series: [{ type: 'pie', radius: ['46%', '70%'], center: ['50%', '43%'], label: { show: false }, data: stats.value?.express_stats.map((item) => ({ name: item.name, value: item.amount })) ?? [], itemStyle: { borderColor: '#fff', borderWidth: 3 } }],
+const pieOption = computed(() => ({
+  tooltip: { trigger: 'item', formatter: '{b}: {c} 元（{d}%）' }, legend: { bottom: 0, textStyle: { color: '#8c94a6', fontSize: 10 } },
+  series: [{ type: 'pie', radius: ['42%', '68%'], center: ['50%', '43%'], label: { show: false }, data: stats.value?.team_stats.slice(0, 8).map((item) => ({ name: item.team, value: item.amount })) ?? [] }],
 }))
-
-async function loadStats() {
-  if (!month.value) return
-  loading.value = true
-  preview.value = undefined
-  try { stats.value = await getExpressStats(month.value) } finally { loading.value = false }
-}
+const barOption = computed(() => {
+  const rows = [...(stats.value?.team_stats.slice(0, 10) ?? [])].reverse()
+  return { tooltip: { trigger: 'axis' }, grid: { top: 15, right: 18, bottom: 25, left: 95 }, xAxis: { type: 'value', axisLabel: { color: '#8c94a6' }, splitLine: { lineStyle: { color: '#eef0f4' } } }, yAxis: { type: 'category', data: rows.map((item) => item.team), axisLabel: { color: '#667085', width: 85, overflow: 'truncate' } }, series: [{ type: 'bar', barWidth: 12, data: rows.map((item) => item.amount), itemStyle: { color: '#16a34a', borderRadius: [0, 4, 4, 0] } }] }
+})
 
 async function loadPreview(page = 1) {
+  if (!month.value) return
   previewLoading.value = true
+  try { preview.value = await getExpressPreview(month.value, page, size.value, filter.value, keyword.value.trim()) } finally { previewLoading.value = false }
+}
+
+async function loadAll() {
+  if (!month.value) return
+  loading.value = true
   try {
-    preview.value = (await http.get(`/express/preview/${month.value}`, { params: { page, size: 50, keyword: keyword.value } })).data
-  } finally { previewLoading.value = false }
+    const [statsData, unmatchedData] = await Promise.all([getExpressStats(month.value), getUnmatchedSummary(month.value)])
+    stats.value = statsData
+    unmatched.value = unmatchedData
+    await loadPreview(1)
+  } finally { loading.value = false }
+}
+
+function setFilter(value: string) {
+  filter.value = value
+  loadPreview(1)
 }
 
 onMounted(async () => {
-  const overview = await getExpressOverview()
-  months.value = overview.months
+  overview.value = await getExpressOverview()
+  months.value = overview.value.months
   const requested = typeof route.query.month === 'string' ? route.query.month : ''
-  month.value = months.value.includes(requested) ? requested : overview.selected_month
+  month.value = months.value.includes(requested) ? requested : overview.value.selected_month
 })
-watch(month, loadStats)
+watch(month, loadAll)
 </script>
 
 <template>
-  <div class="page-heading">
-    <div><h1>快递统计</h1><p>客户费用、快递占比、异常运单和账单明细。</p></div>
-    <ElSelect v-model="month" style="width:150px"><ElOption v-for="item in months" :key="item" :label="item" :value="item" /></ElSelect>
-  </div>
+  <div class="legacy-express">
+    <h1 class="legacy-page-title"><span class="stats-icon">▥</span>统计报表</h1>
+    <div class="month-bar legacy-card"><label>处理月份</label><ElSelect v-model="month" style="width:150px"><ElOption v-for="item in months" :key="item" :label="item" :value="item" /></ElSelect><ElButton :icon="Refresh" :loading="loading" @click="loadAll">刷新数据</ElButton></div>
 
-  <div v-loading="loading">
-    <section class="metric-grid">
-      <article class="surface-card"><span>运单总量</span><strong>{{ formatCount(stats?.total_orders) }}</strong></article>
-      <article class="surface-card"><span>已匹配</span><strong>{{ formatCount(stats?.matched_orders) }}</strong></article>
-      <article class="surface-card"><span>未匹配</span><strong>{{ formatCount(stats?.unmatched_orders) }}</strong></article>
-      <article class="surface-card"><span>应付金额</span><strong>¥ {{ formatCount(stats?.total_amount) }}</strong></article>
-    </section>
+    <div v-loading="loading">
+      <section class="legacy-card report-card">
+        <h2 class="legacy-card-title upper">数据统计</h2>
+        <div class="chart-grid"><div><h3>各月总费用趋势</h3><VChart class="chart" :option="trendOption" autoresize /></div><div><h3>本月各团队占比</h3><VChart class="chart" :option="pieOption" autoresize /></div><div><h3>团队费用 TOP 10</h3><VChart class="chart" :option="barOption" autoresize /></div></div>
+        <h3 class="table-caption">团队计费汇总</h3>
+        <ElTable :data="stats?.team_summary ?? []" border stripe :row-class-name="teamRowClass">
+          <ElTableColumn prop="team" label="团队" min-width="180" />
+          <ElTableColumn label="单票计费金额" min-width="150" align="right"><template #default="{ row }"><span class="money">{{ money(row.single_amount) }}</span></template></ElTableColumn>
+          <ElTableColumn prop="average_count" label="全国均重票数" min-width="140" align="right" />
+          <ElTableColumn label="总金额" min-width="150" align="right"><template #default="{ row }"><span class="money">{{ money(row.total_amount) }}</span></template></ElTableColumn>
+        </ElTable>
+      </section>
 
-    <div class="chart-grid">
-      <section class="surface-card chart-card"><h3>客户费用 TOP 10</h3><VChart :option="teamChart" autoresize class="chart" /></section>
-      <section class="surface-card chart-card"><h3>快递费用占比</h3><VChart :option="expressChart" autoresize class="chart" /></section>
+      <section class="legacy-card report-card">
+        <h2 class="legacy-card-title upper">未匹配运单分析</h2>
+        <div class="unmatched-grid"><article><span>总运单</span><strong>{{ unmatched?.total.toLocaleString() ?? 0 }}</strong></article><article><span>已匹配</span><strong class="green">{{ unmatched?.matched.toLocaleString() ?? 0 }}</strong></article><article><span>未匹配</span><strong class="red">{{ unmatched?.unmatched.toLocaleString() ?? 0 }}</strong></article><article><span>未匹配率</span><strong class="orange">{{ unmatched?.ratio ?? 0 }}%</strong></article></div>
+        <div class="unmatched-details"><div><b>按快递分布</b><span v-for="(count, name) in unmatched?.by_express" :key="name">{{ name }}：{{ count.toLocaleString() }} 条</span><span v-if="!Object.keys(unmatched?.by_express ?? {}).length">暂无未匹配运单</span></div><div><b>示例运单号</b><span>{{ unmatched?.samples.join('、') || '暂无' }}</span></div><p>常见原因：运单不属于本店、SQL 日期范围未覆盖、运单号格式不一致。</p></div>
+      </section>
+
+      <section class="legacy-card report-card">
+        <div class="report-heading"><h2 class="legacy-card-title upper">异常运单分析</h2><ElButton v-if="auth.can('express.download')" :icon="Download" tag="a" :href="`/api/v1/express/anomalies/${month}/download`">导出异常运单</ElButton></div>
+        <ElCollapse v-if="stats?.anomalies.length">
+          <ElCollapseItem v-for="item in stats.anomalies" :key="item.type" :name="item.type"><template #title><div class="anomaly-title"><ElTag :type="item.level === 'high' ? 'danger' : 'warning'">{{ item.level === 'high' ? '高风险' : '需关注' }}</ElTag><b>{{ item.type }}</b><span>{{ item.count.toLocaleString() }} 条 · {{ item.pct }}%</span></div></template><div class="anomaly-detail">示例运单：{{ item.samples.join('、') || '—' }}</div></ElCollapseItem>
+        </ElCollapse><div v-else class="legacy-empty">本月未发现异常运单</div>
+      </section>
+
+      <section class="legacy-card report-card">
+        <div class="report-heading"><h2 class="legacy-card-title upper">对账结果预览</h2><div class="preview-search"><ElInput v-model="keyword" :prefix-icon="Search" clearable placeholder="搜索运单号 / 团队" @keyup.enter="loadPreview(1)" /><ElButton type="primary" @click="loadPreview(1)">搜索</ElButton></div></div>
+        <div class="filter-row"><button :class="{ active: filter === 'all' }" @click="setFilter('all')">全部 {{ preview?.total ?? 0 }}</button><button :class="{ active: filter === 'matched' }" @click="setFilter('matched')">已匹配 {{ preview?.matched ?? 0 }}</button><button :class="{ active: filter === 'unmatched' }" @click="setFilter('unmatched')">未匹配 {{ preview?.unmatched ?? 0 }}</button><button :class="{ active: filter === 'single' }" @click="setFilter('single')">单票计费</button><button :class="{ active: filter === 'average' }" @click="setFilter('average')">全国均重</button></div>
+        <ElTable v-loading="previewLoading" :data="preview?.rows ?? []" height="450" border stripe><ElTableColumn prop="运单号" label="运单号" min-width="170" /><ElTableColumn prop="所属团队" label="所属团队" min-width="150" show-overflow-tooltip /><ElTableColumn prop="目的省份" label="目的省份" width="105" /><ElTableColumn prop="结算重量" label="结算重量" width="105" align="right" /><ElTableColumn prop="快递类型" label="快递类型" width="95" /><ElTableColumn prop="实际计算方式" label="实际计算方式" width="125" /><ElTableColumn label="单票应付金额" width="135" align="right"><template #default="{ row }"><span class="money">{{ money(Number(row['单票应付金额'])) }}</span></template></ElTableColumn></ElTable>
+        <div class="pagination-row"><span>筛选后 {{ preview?.filtered ?? 0 }} 条</span><ElPagination v-if="preview" :current-page="preview.page" :page-size="preview.size" :total="preview.filtered" layout="prev, pager, next" @current-change="loadPreview" /></div>
+      </section>
     </div>
-
-    <section class="surface-card anomaly-card">
-      <div class="card-title-row"><div><h3>异常分析</h3><p>沿用老系统的重量、省份、金额和团队匹配规则。</p></div><ElButton tag="a" :href="`/api/v1/express/anomalies/${month}/download`" :icon="Download">导出异常</ElButton></div>
-      <ElTable :data="stats?.anomalies ?? []" stripe>
-        <ElTableColumn prop="type" label="异常类型" min-width="150" />
-        <ElTableColumn label="级别" width="100"><template #default="{ row }"><ElTag :type="row.level === 'high' ? 'danger' : 'warning'" effect="light">{{ row.level === 'high' ? '高' : '中' }}</ElTag></template></ElTableColumn>
-        <ElTableColumn prop="count" label="数量" width="110" />
-        <ElTableColumn label="占比" width="100"><template #default="{ row }">{{ row.pct }}%</template></ElTableColumn>
-        <ElTableColumn label="示例运单"><template #default="{ row }">{{ row.samples.join('、') || '—' }}</template></ElTableColumn>
-      </ElTable>
-    </section>
-
-    <section class="surface-card preview-card">
-      <div class="card-title-row"><div><h3>对账明细</h3><p>按需加载，支持运单号、团队、省份和快递搜索。</p></div><div class="search-box"><ElInput v-model="keyword" placeholder="搜索明细" :prefix-icon="Search" clearable @keyup.enter="loadPreview(1)" /><ElButton type="primary" @click="loadPreview(1)">加载明细</ElButton></div></div>
-      <ElTable v-if="preview" v-loading="previewLoading" :data="preview.rows" height="430" stripe>
-        <ElTableColumn v-for="column in Object.keys(preview.rows[0] ?? {})" :key="column" :prop="column" :label="column" min-width="130" show-overflow-tooltip />
-      </ElTable>
-      <ElEmpty v-else description="点击“加载明细”查看迁移的完整对账数据" />
-      <ElPagination v-if="preview" v-model:current-page="preview.page" layout="prev, pager, next, total" :total="preview.total" :page-size="50" @current-change="loadPreview" />
-    </section>
   </div>
 </template>
 
 <style scoped>
-.metric-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:17px; margin-bottom:18px; }
-.metric-grid article { padding:22px; }
-.metric-grid span { color:#7d899b; font-size:12px; }
-.metric-grid strong { display:block; margin-top:10px; color:#172641; font-size:24px; }
-.chart-grid { display:grid; grid-template-columns:1.4fr .8fr; gap:18px; margin-bottom:18px; }
-.chart-card,.anomaly-card,.preview-card { padding:24px 26px; }
-h3 { margin:0; color:#243149; font-size:16px; }
-.chart { height:330px; }
-.anomaly-card,.preview-card { margin-bottom:18px; }
-.card-title-row { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px; gap:18px; }
-.card-title-row p { margin:6px 0 0; color:#929dad; font-size:11px; }
-.search-box { display:flex; gap:8px; width:380px; }
-.preview-card :deep(.el-pagination) { justify-content:flex-end; margin-top:18px; }
-@media(max-width:1000px){.metric-grid{grid-template-columns:repeat(2,1fr)}.chart-grid{grid-template-columns:1fr}}
+.stats-icon{color:var(--ex-accent)}.month-bar{display:flex;align-items:center;gap:12px;margin-bottom:20px;padding:14px 18px}.month-bar label{color:var(--ex-muted);font-size:12px}
+.report-card{margin-bottom:20px;padding:22px 20px}.chart-grid{display:grid;grid-template-columns:1.4fr .8fr 1fr;gap:18px;margin-bottom:22px}.chart-grid>div{min-width:0;padding:12px;border:1px solid #eef0f4;border-radius:9px}.chart-grid h3,.table-caption{margin:0 0 10px;color:var(--ex-muted);font-size:11px;font-weight:600;letter-spacing:.05em}.chart{height:255px}.table-caption{margin-top:4px}
+:deep(.total-row td){font-weight:700;background:#f8faff!important}.unmatched-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.unmatched-grid article{padding:18px;border:1px solid var(--ex-border);border-radius:9px}.unmatched-grid span{display:block;color:var(--ex-muted);font-size:11px}.unmatched-grid strong{display:block;margin-top:8px;font:700 24px Consolas}.green{color:var(--ex-success)}.red{color:var(--ex-danger)}.orange{color:var(--ex-warning)}
+.unmatched-details{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}.unmatched-details>div{display:flex;gap:8px;padding:14px;border-radius:8px;background:#f8f9fb;flex-direction:column;font-size:12px}.unmatched-details b{color:var(--ex-text)}.unmatched-details span,.unmatched-details p{color:var(--ex-muted)}.unmatched-details p{grid-column:1/-1;margin:0;font-size:12px}
+.report-heading{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:15px}.report-heading .legacy-card-title{margin:0}.anomaly-title{display:flex;align-items:center;gap:10px;width:100%}.anomaly-title b{font-size:13px}.anomaly-title span{margin-left:auto;margin-right:16px;color:var(--ex-muted);font-size:12px}.anomaly-detail{padding:4px 10px 10px;color:var(--ex-muted);font-size:12px}.preview-search{display:flex;gap:8px;width:360px}.filter-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}.filter-row button{padding:7px 13px;border:1px solid var(--ex-border);border-radius:16px;color:var(--ex-muted);background:#fff;cursor:pointer;font-size:12px}.filter-row button.active{border-color:var(--ex-accent);color:var(--ex-accent);background:#eff6ff}.pagination-row{display:flex;align-items:center;justify-content:space-between;margin-top:14px;color:var(--ex-muted);font-size:12px}
+@media(max-width:1200px){.chart-grid{grid-template-columns:1fr 1fr}.chart-grid>div:first-child{grid-column:1/-1}}@media(max-width:800px){.chart-grid,.unmatched-grid,.unmatched-details{grid-template-columns:1fr}.chart-grid>div:first-child,.unmatched-details p{grid-column:auto}.report-heading{align-items:flex-start;flex-direction:column}.preview-search{width:100%}}
 </style>

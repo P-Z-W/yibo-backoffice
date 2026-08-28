@@ -16,10 +16,11 @@ import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import require_permission
 from app.core.config import settings
 from app.db.session import get_db
 from app.domains.express import legacy_settings
@@ -46,14 +47,14 @@ from app.services.express_stats import (
     output_folder,
     preview_rows,
     trend_data,
-    unmatched_rows,
+    unmatched_summary,
     validate_month,
 )
 
 router = APIRouter(prefix="/express", tags=["快递对账"])
 
 
-def auth_user(user: User = Depends(get_current_user)) -> User:
+def auth_user(user: User = Depends(require_permission("express.view"))) -> User:
     return user
 
 
@@ -81,12 +82,12 @@ def upload_bill(
     month: str = Form(default=legacy_settings.PROCESS_MONTH),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _: User = Depends(auth_user),
+    _: User = Depends(require_permission("express.run")),
 ) -> dict[str, object]:
     validate_month(month)
     filename = Path(file.filename or "").name
-    if not filename.lower().endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="仅支持 Excel 账单文件")
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 账单文件")
     destination = settings.storage_path / "data" / month / filename
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as output:
@@ -117,7 +118,9 @@ def upload_bill(
 
 
 @router.post("/run")
-def run_reconciliation(user: User = Depends(auth_user)) -> dict[str, object]:
+def run_reconciliation(
+    user: User = Depends(require_permission("express.run")),
+) -> dict[str, object]:
     ok, message = express_jobs.start_reconciliation(user.id)
     if not ok:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=message)
@@ -125,12 +128,12 @@ def run_reconciliation(user: User = Depends(auth_user)) -> dict[str, object]:
 
 
 @router.get("/status")
-def job_status(_: User = Depends(auth_user)) -> dict[str, object]:
+def job_status(_: User = Depends(require_permission("express.run"))) -> dict[str, object]:
     return dict(express_jobs.state)
 
 
 @router.get("/logs")
-def stream_logs(_: User = Depends(auth_user)) -> StreamingResponse:
+def stream_logs(_: User = Depends(require_permission("express.run"))) -> StreamingResponse:
     def generate():
         while True:
             try:
@@ -164,8 +167,10 @@ def trend(_: User = Depends(auth_user)) -> list[dict[str, object]]:
 
 @router.get("/unmatched/{month}")
 def unmatched(month: str, _: User = Depends(auth_user)) -> dict[str, object]:
-    rows = unmatched_rows(month)
-    return {"month": month, "count": len(rows), "rows": rows}
+    result = unmatched_summary(month)
+    if not result["ok"]:
+        raise HTTPException(status_code=404, detail=result["msg"])
+    return result
 
 
 @router.get("/preview/{month}")
@@ -173,14 +178,22 @@ def preview(
     month: str,
     page: int = Query(default=1, ge=1),
     size: int = Query(default=50, ge=10, le=200),
+    filter_: str = Query(default="all", alias="filter"),
     keyword: str = "",
     _: User = Depends(auth_user),
 ) -> dict[str, object]:
-    return preview_rows(month, page, size, keyword.strip())
+    if filter_ not in {"all", "matched", "unmatched", "single", "average"}:
+        raise HTTPException(status_code=400, detail="不支持的筛选条件")
+    result = preview_rows(month, page, size, filter_, keyword.strip())
+    if not result["ok"]:
+        raise HTTPException(status_code=404, detail=f"{month} 对账结果文件不存在")
+    return result
 
 
 @router.get("/download/{month}")
-def download_month(month: str, _: User = Depends(auth_user)) -> FileResponse:
+def download_month(
+    month: str, _: User = Depends(require_permission("express.download"))
+) -> FileResponse:
     folder = output_folder(month)
     if not folder.exists():
         raise HTTPException(status_code=404, detail="该月份没有结果文件")
@@ -193,12 +206,48 @@ def download_month(month: str, _: User = Depends(auth_user)) -> FileResponse:
 
 
 @router.get("/anomalies/{month}/download")
-def download_anomalies(month: str, _: User = Depends(auth_user)) -> StreamingResponse:
+def download_anomalies(
+    month: str, _: User = Depends(require_permission("express.download"))
+) -> StreamingResponse:
     frame = anomaly_frame(month)
+    if frame.empty:
+        raise HTTPException(status_code=404, detail=f"{month} 未发现任何异常运单")
     buffer = BytesIO()
-    frame.to_excel(buffer, index=False)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        frame.to_excel(writer, index=False)
+        sheet = writer.book.active
+        headers = [cell.value for cell in sheet[1]]
+        type_column = headers.index("异常类型") + 1
+        reason_column = headers.index("异常原因说明") + 1
+        fill_high = PatternFill("solid", fgColor="4D1010")
+        fill_mid = PatternFill("solid", fgColor="4D3010")
+        fill_head = PatternFill("solid", fgColor="1E2235")
+        for cell in sheet[1]:
+            cell.fill = fill_head
+            cell.font = Font(bold=True, color="FFFFFF", size=11)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for row in sheet.iter_rows(min_row=2):
+            type_cell = row[type_column - 1]
+            types = str(type_cell.value or "").split("/")
+            type_cell.fill = fill_high if "重量异常" in types else fill_mid
+            type_cell.font = Font(bold=True, color="FFFFFF", size=11)
+            type_cell.alignment = Alignment(horizontal="center", vertical="center")
+            row[reason_column - 1].alignment = Alignment(wrap_text=True, vertical="top")
+        for index, header in enumerate(headers, start=1):
+            if header == "运单号":
+                width = 22
+            elif header == "异常类型":
+                width = 18
+            elif header == "异常原因说明":
+                width = 55
+            elif header in ("目的省份", "目的城市", "快递类型", "所属团队"):
+                width = 14
+            else:
+                width = 12
+            sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
+        sheet.freeze_panes = "A2"
     buffer.seek(0)
-    filename = quote(f"{month}_异常运单.xlsx")
+    filename = quote(f"{month}_异常运单_{len(frame)}条.xlsx")
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -207,7 +256,10 @@ def download_anomalies(month: str, _: User = Depends(auth_user)) -> StreamingRes
 
 
 @router.get("/config/prices")
-def get_prices(db: Session = Depends(get_db), _: User = Depends(auth_user)) -> dict[str, object]:
+def get_prices(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("express.configure")),
+) -> dict[str, object]:
     price_file = settings.storage_path / "config" / "price_config.xlsx"
     if not price_file.exists():
         raise HTTPException(status_code=404, detail="报价表不存在")
@@ -238,7 +290,7 @@ def get_prices(db: Session = Depends(get_db), _: User = Depends(auth_user)) -> d
 def save_prices(
     payload: dict[str, list[dict[str, object]]],
     db: Session = Depends(get_db),
-    _: User = Depends(auth_user),
+    _: User = Depends(require_permission("express.configure")),
 ) -> dict[str, object]:
     price_file = settings.storage_path / "config" / "price_config.xlsx"
     if not price_file.exists():
@@ -270,7 +322,8 @@ def save_prices(
 
 @router.get("/config/carriers")
 def get_carriers(
-    db: Session = Depends(get_db), _: User = Depends(auth_user)
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("express.configure")),
 ) -> list[dict[str, object]]:
     rows = db.scalars(select(ExpressCarrier).order_by(ExpressCarrier.sort_order)).all()
     return [
@@ -288,7 +341,7 @@ def get_carriers(
 def save_carriers(
     payload: CarrierListInput,
     db: Session = Depends(get_db),
-    _: User = Depends(auth_user),
+    _: User = Depends(require_permission("express.configure")),
 ) -> dict[str, object]:
     db.execute(delete(ExpressCarrier))
     rows = []
@@ -311,7 +364,10 @@ def save_carriers(
 
 
 @router.get("/config/settings")
-def get_settings(db: Session = Depends(get_db), _: User = Depends(auth_user)) -> dict[str, object]:
+def get_settings(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("express.configure")),
+) -> dict[str, object]:
     before = int(db.get(SystemSetting, "express.extend_days_before").value)
     after = int(db.get(SystemSetting, "express.extend_days_after").value)
     first = datetime.now().replace(day=1)
@@ -331,7 +387,7 @@ def get_settings(db: Session = Depends(get_db), _: User = Depends(auth_user)) ->
 def save_settings(
     payload: ExpressSettingsInput,
     db: Session = Depends(get_db),
-    _: User = Depends(auth_user),
+    _: User = Depends(require_permission("express.configure")),
 ) -> dict[str, object]:
     values = {
         "express.extend_days_before": payload.extend_days_before,
@@ -357,7 +413,8 @@ def save_settings(
 
 @router.get("/config/customers")
 def get_customers(
-    db: Session = Depends(get_db), _: User = Depends(auth_user)
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("express.configure")),
 ) -> list[dict[str, object]]:
     rows = db.scalars(select(TeamExpressPrice).order_by(TeamExpressPrice.seq)).all()
     return [
@@ -382,7 +439,7 @@ def get_customers(
 def save_customers(
     payload: TeamPriceListInput,
     db: Session = Depends(get_db),
-    _: User = Depends(auth_user),
+    _: User = Depends(require_permission("express.configure")),
 ) -> dict[str, object]:
     db.execute(delete(TeamSpecialRule))
     db.execute(delete(TeamExpressPrice))

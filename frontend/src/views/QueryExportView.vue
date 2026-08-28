@@ -11,7 +11,9 @@ import {
   type QueryEntry,
   type QueryHistory,
 } from '../api/queryExport'
+import { useAuthStore } from '../stores/auth'
 
+const auth = useAuthStore()
 const loading = ref(true)
 const groups = ref<Record<string, QueryEntry[]>>({})
 const history = ref<QueryHistory[]>([])
@@ -79,29 +81,29 @@ onBeforeUnmount(() => source?.close())
 <template>
   <div class="page-heading">
     <div><h1>查询导出</h1><p>4 条历史查询配置已迁移，SQL 只允许执行只读 SELECT / WITH。</p></div>
-    <ElButton type="primary" :icon="VideoPlay" :loading="running" @click="run">运行所选查询</ElButton>
+    <ElButton v-if="auth.can('query.run')" type="primary" :icon="VideoPlay" :loading="running" @click="run">运行所选查询</ElButton>
   </div>
 
   <div class="query-layout" v-loading="loading">
     <aside class="surface-card query-list">
-      <div class="list-heading"><strong>查询列表</strong><ElButton text type="primary" :icon="Plus" @click="add">新增</ElButton></div>
+      <div class="list-heading"><strong>查询列表</strong><ElButton v-if="auth.can('query.configure')" text type="primary" :icon="Plus" @click="add">新增</ElButton></div>
       <ElTabs v-model="activeGroup" stretch>
         <ElTabPane v-for="(_, group) in groups" :key="group" :name="group" :label="group" />
       </ElTabs>
       <ElCheckboxGroup v-model="selectedIds" class="entries">
         <div v-for="entry in groupEntries" :key="entry.id" :class="['entry', { active: active?.id === entry.id }]" @click="choose(entry)">
-          <ElCheckbox :value="entry.id" @click.stop />
+          <ElCheckbox :value="entry.id" :disabled="!auth.can('query.run')" @click.stop />
           <div><strong>{{ entry.filename || '未命名查询' }}</strong><span>{{ entry.sql_preview || '尚未填写 SQL' }}</span></div>
-          <ElButton text type="danger" :icon="Delete" @click.stop="remove(entry)" />
+          <ElButton v-if="auth.can('query.configure')" text type="danger" :icon="Delete" @click.stop="remove(entry)" />
         </div>
       </ElCheckboxGroup>
     </aside>
 
     <main class="surface-card editor-card">
       <template v-if="active">
-        <div class="editor-heading"><div><span>输出文件名</span><ElInput v-model="active.filename" placeholder="请输入导出文件名" /></div><ElButton type="primary" @click="save">保存查询</ElButton></div>
+        <div class="editor-heading"><div><span>输出文件名</span><ElInput v-model="active.filename" :disabled="!auth.can('query.configure')" placeholder="请输入导出文件名" /></div><ElButton v-if="auth.can('query.configure')" type="primary" @click="save">保存查询</ElButton></div>
         <label>SQL 语句</label>
-        <ElInput v-model="active.sql_content" type="textarea" :rows="21" resize="none" class="sql-editor" spellcheck="false" />
+        <ElInput v-model="active.sql_content" :disabled="!auth.can('query.configure')" type="textarea" :rows="21" resize="none" class="sql-editor" spellcheck="false" />
       </template>
       <ElEmpty v-else description="请选择一条查询" />
     </main>
@@ -109,7 +111,7 @@ onBeforeUnmount(() => source?.close())
 
   <div class="bottom-grid">
     <section class="surface-card log-card"><div class="section-heading"><h3>运行日志</h3><span>{{ running ? '运行中' : '空闲' }}</span></div><pre>{{ logs.length ? logs.join('\n') : '选择查询并运行后，日志将在这里显示。' }}</pre></section>
-    <section class="surface-card history-card"><div class="section-heading"><h3>历史导出</h3><span>{{ history.length }} 个日期</span></div><div class="history-list"><div v-for="record in history" :key="record.date"><strong>{{ record.date }}</strong><a v-for="file in record.files" :key="file" :href="`/api/v1/query-export/download/${record.date}/${encodeURIComponent(file)}`"><Download />{{ file }}</a></div></div></section>
+    <section class="surface-card history-card"><div class="section-heading"><h3>历史导出</h3><span>{{ history.length }} 个日期</span></div><div class="history-list"><div v-for="record in history" :key="record.date"><strong>{{ record.date }}</strong><template v-for="file in record.files" :key="file"><a v-if="auth.can('query.download')" :href="`/api/v1/query-export/download/${record.date}/${encodeURIComponent(file)}`"><Download />{{ file }}</a><span v-else>{{ file }}</span></template></div></div></section>
   </div>
 </template>
 

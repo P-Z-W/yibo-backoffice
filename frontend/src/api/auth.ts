@@ -5,6 +5,12 @@ export interface CurrentUser {
   username: string
   display_name: string
   role: string
+  role_name: string
+  roles: string[]
+  role_names: string[]
+  team: string
+  permissions: Record<string, string>
+  must_change_password: boolean
 }
 
 interface AuthResponse {
@@ -23,4 +29,12 @@ export async function currentUserRequest() {
 
 export async function logoutRequest() {
   await http.post('/auth/logout')
+}
+
+export async function changePasswordRequest(currentPassword: string, newPassword: string) {
+  const { data } = await http.post<AuthResponse>('/auth/change-password', {
+    current_password: currentPassword,
+    new_password: newPassword,
+  })
+  return data.user
 }

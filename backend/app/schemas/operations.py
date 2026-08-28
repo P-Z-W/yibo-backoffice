@@ -1,6 +1,7 @@
 """Schemas for migrated operational modules."""
 
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -62,3 +63,12 @@ class MonthlyAnalyticsInput(BaseModel):
     month: str = Field(pattern=r"^\d{4}-\d{2}$")
     metrics: list[MonthlyMetricInput]
     summary: str = ""
+    highlights: str = ""
+    issues: str = ""
+    risks: str = ""
+    next_plan: str = ""
+
+
+class MonthlyAnalyticsStatusInput(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    status: Literal["draft", "completed", "archived"]

@@ -13,6 +13,7 @@ import pandas as pd
 from app.core.config import settings
 
 MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
+STATS_CACHE_VERSION = 2
 
 
 def validate_month(month: str) -> str:
@@ -71,12 +72,18 @@ def history_records() -> list[dict[str, object]]:
             log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
         )
         result = "无记录"
-        if "成功 ✅" in content:
+        last_time = ""
+        last_section = content.split("【第")[-1] if "【第" in content else ""
+        if "成功 ✅" in last_section:
             result = "成功"
-        elif "失败 ❌" in content:
+        elif "失败 ❌" in last_section:
             result = "失败"
+        for line in last_section.splitlines():
+            if "】" in line:
+                last_time = line.split("】", maxsplit=1)[-1].strip()
+                break
         elapsed = ""
-        for line in reversed(content.splitlines()):
+        for line in last_section.splitlines():
             if line.startswith("耗时："):
                 elapsed = line.replace("耗时：", "").strip()
                 break
@@ -86,6 +93,7 @@ def history_records() -> list[dict[str, object]]:
                 "month": month,
                 "run_count": content.count("【第"),
                 "last_result": result,
+                "last_time": last_time,
                 "last_duration": elapsed,
                 "file_count": len(files),
                 "size_bytes": sum(item.stat().st_size for item in files),
@@ -145,6 +153,42 @@ def month_stats(month: str) -> dict[str, object]:
             }
             for _, row in grouped.iterrows()
         ]
+
+        summary = []
+        total_single = 0.0
+        total_average = 0
+        total_amount = 0.0
+        for team, group in matched.groupby("所属团队", dropna=False):
+            if "实际计算方式" in group.columns:
+                single_mask = group["实际计算方式"] == "单票"
+                average_mask = group["实际计算方式"] == "全国均重"
+                single_amount = round(float(group.loc[single_mask, "_amount"].sum()), 2)
+                average_count = int(average_mask.sum())
+            else:
+                single_amount = 0.0
+                average_count = 0
+            team_amount = round(float(group["_amount"].sum()), 2)
+            total_single += single_amount
+            total_average += average_count
+            total_amount += team_amount
+            summary.append(
+                {
+                    "team": str(team),
+                    "single_amount": single_amount,
+                    "average_count": average_count,
+                    "total_amount": team_amount,
+                }
+            )
+        summary.sort(key=lambda item: item["total_amount"], reverse=True)
+        summary.append(
+            {
+                "team": "合计",
+                "single_amount": round(total_single, 2),
+                "average_count": total_average,
+                "total_amount": round(total_amount, 2),
+            }
+        )
+        base["team_summary"] = summary
 
     if "快递类型" in matched.columns:
         grouped = (
@@ -215,6 +259,8 @@ def _load_stats_cache(month: str, source: Path) -> dict[str, object] | None:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
         if payload.get("source_mtime_ns") != source.stat().st_mtime_ns:
             return None
+        if payload.get("version") != STATS_CACHE_VERSION:
+            return None
         return payload["data"]
     except (OSError, ValueError, KeyError):
         return None
@@ -227,7 +273,11 @@ def _save_stats_cache(month: str, source: Path, data: dict[str, object]) -> None
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
         json.dumps(
-            {"source_mtime_ns": source.stat().st_mtime_ns, "data": data},
+            {
+                "version": STATS_CACHE_VERSION,
+                "source_mtime_ns": source.stat().st_mtime_ns,
+                "data": data,
+            },
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -239,10 +289,12 @@ def trend_data() -> list[dict[str, object]]:
     for month in reversed(available_months()):
         stats = month_stats(month)
         if stats["total_orders"]:
+            frame = read_result(month)
+            total = round(float(_numeric(frame, "单票应付金额").sum()), 2)
             points.append(
                 {
                     "month": month,
-                    "amount": stats["total_amount"],
+                    "amount": total,
                     "orders": stats["total_orders"],
                     "unmatched": stats["unmatched_orders"],
                 }
@@ -261,17 +313,91 @@ def unmatched_rows(month: str, limit: int = 200) -> list[dict[str, object]]:
     return _records(rows[columns])
 
 
-def preview_rows(month: str, page: int, size: int, keyword: str = "") -> dict[str, object]:
+def unmatched_summary(month: str) -> dict[str, object]:
     frame = read_result(month)
     if frame.empty:
-        return {"rows": [], "total": 0, "page": page, "size": size, "total_pages": 1}
+        return {
+            "ok": False,
+            "month": month,
+            "msg": f"{month} 对账结果文件不存在",
+            "total": 0,
+            "matched": 0,
+            "unmatched": 0,
+            "ratio": 0,
+            "by_express": {},
+            "samples": [],
+        }
+    total = len(frame)
+    if "所属团队" in frame.columns:
+        unmatched = frame[frame["所属团队"] == "未匹配"]
+    else:
+        unmatched = frame
+    by_express: dict[str, int] = {}
+    if "快递类型" in unmatched.columns:
+        by_express = {
+            str(name): int(len(group))
+            for name, group in unmatched.groupby("快递类型", dropna=False)
+        }
+    samples = []
+    if "运单号" in unmatched.columns:
+        samples = unmatched["运单号"].astype(str).head(5).tolist()
+    return {
+        "ok": True,
+        "month": month,
+        "total": total,
+        "matched": total - len(unmatched),
+        "unmatched": len(unmatched),
+        "ratio": round(len(unmatched) / total * 100, 1) if total else 0,
+        "by_express": by_express,
+        "samples": samples,
+    }
+
+
+def preview_rows(
+    month: str,
+    page: int,
+    size: int,
+    filter_: str = "all",
+    keyword: str = "",
+) -> dict[str, object]:
+    frame = read_result(month)
+    if frame.empty:
+        return {
+            "ok": False,
+            "month": month,
+            "rows": [],
+            "total": 0,
+            "matched": 0,
+            "unmatched": 0,
+            "filtered": 0,
+            "page": page,
+            "size": size,
+            "total_pages": 1,
+        }
+    total = len(frame)
+    if "所属团队" in frame.columns:
+        matched_count = int((frame["所属团队"] != "未匹配").sum())
+    else:
+        matched_count = 0
+    unmatched_count = total - matched_count
+    if "所属团队" in frame.columns and "实际计算方式" in frame.columns:
+        if filter_ == "matched":
+            frame = frame[frame["所属团队"] != "未匹配"]
+        elif filter_ == "unmatched":
+            frame = frame[frame["所属团队"] == "未匹配"]
+        elif filter_ == "single":
+            frame = frame[frame["实际计算方式"] == "单票"]
+        elif filter_ == "average":
+            frame = frame[frame["实际计算方式"] == "全国均重"]
     if keyword:
         mask = pd.Series(False, index=frame.index)
-        for column in ("运单号", "所属团队", "目的省份", "快递类型"):
+        for column in ("运单号", "所属团队"):
             if column in frame.columns:
-                mask |= frame[column].fillna("").astype(str).str.contains(keyword, case=False)
+                mask |= frame[column].fillna("").astype(str).str.contains(
+                    keyword, case=False, regex=False
+                )
         frame = frame[mask]
-    total = len(frame)
+    filtered = len(frame)
     columns = [
         col
         for col in (
@@ -288,10 +414,15 @@ def preview_rows(month: str, page: int, size: int, keyword: str = "") -> dict[st
     page_frame = frame.iloc[(page - 1) * size : page * size]
     return {
         "rows": _records(page_frame[columns]),
+        "ok": True,
+        "month": month,
         "total": total,
+        "matched": matched_count,
+        "unmatched": unmatched_count,
+        "filtered": filtered,
         "page": page,
         "size": size,
-        "total_pages": max(1, math.ceil(total / size)),
+        "total_pages": max(1, math.ceil(filtered / size)),
     }
 
 
@@ -299,15 +430,65 @@ def anomaly_frame(month: str) -> pd.DataFrame:
     frame = read_result(month)
     if frame.empty:
         return frame
-    mask = pd.Series(False, index=frame.index)
+
+    frame = frame.copy()
+    anomaly_map: dict[object, dict[str, list[str]]] = {}
+
+    def mark(mask: pd.Series, anomaly_type: str, reason: str) -> None:
+        for index in frame[mask].index:
+            target = anomaly_map.setdefault(index, {"types": [], "reasons": []})
+            if anomaly_type not in target["types"]:
+                target["types"].append(anomaly_type)
+            target["reasons"].append(reason)
+
     if "结算重量" in frame.columns:
         weight = _numeric(frame, "结算重量")
-        mask |= (weight <= 0) | (weight >= 50)
+        frame["结算重量"] = weight
+        mark(
+            weight <= 0,
+            "重量异常",
+            "结算重量为0或负数，可能录入错误或账单格式问题，建议核对原始账单",
+        )
+        mark(
+            weight >= 50,
+            "重量异常",
+            "结算重量≥50kg，超出正常范围，建议人工核实是否为实际重量",
+        )
     if "目的省份" in frame.columns:
-        mask |= frame["目的省份"].fillna("").astype(str).str.strip() == ""
+        mark(
+            frame["目的省份"].fillna("").astype(str).str.strip() == "",
+            "省份为空",
+            "目的省份字段为空，计费模式可能判断不准确，建议检查原始账单格式",
+        )
+    if "实际计算方式" in frame.columns and "单票应付金额" in frame.columns:
+        amount = pd.to_numeric(frame["单票应付金额"], errors="coerce")
+        frame["单票应付金额"] = amount
+        mark(
+            (frame["实际计算方式"] == "单票") & (amount.isna() | (amount == 0)),
+            "单票金额为零",
+            "计费方式为单票但应付金额为0，可能报价表缺少该省份数据，建议检查申通/中通报价配置",
+        )
     if "所属团队" in frame.columns:
-        mask |= frame["所属团队"] == "未匹配"
-    return frame[mask]
+        mark(
+            frame["所属团队"] == "未匹配",
+            "未匹配团队",
+            "运单号在数据库订单中未找到对应团队，可能原因："
+            "①运单不属于本店 ②SQL日期范围未覆盖 ③运单号格式不一致",
+        )
+    if not anomaly_map:
+        return frame.iloc[0:0]
+
+    indexes = list(anomaly_map)
+    result = frame.loc[indexes].copy()
+    result["异常类型"] = ["/".join(anomaly_map[index]["types"]) for index in indexes]
+    result["异常原因说明"] = [
+        "\n".join(anomaly_map[index]["reasons"]) for index in indexes
+    ]
+    level_order = {"重量异常": 0, "省份为空": 1, "单票金额为零": 2, "未匹配团队": 3}
+    result["_sort"] = result["异常类型"].apply(
+        lambda value: min(level_order.get(name, 9) for name in value.split("/"))
+    )
+    return result.sort_values("_sort").drop(columns="_sort").reset_index(drop=True)
 
 
 def _records(frame: pd.DataFrame) -> list[dict[str, object]]:

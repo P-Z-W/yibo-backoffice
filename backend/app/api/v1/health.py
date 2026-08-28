@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import require_system_admin
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.analytics import MetricDefinition, MonthlyMetric, MonthlyReview
@@ -16,17 +16,13 @@ router = APIRouter(tags=["系统"])
 @router.get("/health")
 def health(db: Session = Depends(get_db)) -> dict[str, str]:
     db.execute(text("SELECT 1"))
-    return {
-        "status": "ok",
-        "database": "connected",
-        "version": settings.app_version,
-    }
+    return {"status": "ok"}
 
 
 @router.get("/system/overview")
 def system_overview(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_system_admin),
 ) -> dict[str, object]:
     return {
         "version": settings.app_version,
@@ -36,6 +32,8 @@ def system_overview(
             {"name": "快递对账", "status": "ready"},
             {"name": "数据查询", "status": "ready"},
             {"name": "员工工资", "status": "ready"},
+            {"name": "报销管理", "status": "ready"},
+            {"name": "账号与权限", "status": "ready"},
         ],
         "analytics": {
             "metric_definitions": db.scalar(select(func.count(MetricDefinition.id))) or 0,

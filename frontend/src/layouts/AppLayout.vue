@@ -6,6 +6,8 @@ import {
   Document,
   Files,
   House,
+  Key,
+  Lock,
   Money,
   Operation,
   PieChart,
@@ -15,16 +17,48 @@ import {
   User,
   Wallet,
 } from '@element-plus/icons-vue'
-import { ElMessageBox } from 'element-plus'
-import { computed } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const passwordDialog = ref(false)
+const passwordSaving = ref(false)
+const passwordForm = reactive({ current: '', password: '', confirm: '' })
 
 const pageTitle = computed(() => String(route.meta.title ?? '工作台'))
+const roleLabel = computed(() => {
+  return auth.user?.role_names?.join('、') || auth.user?.role_name || auth.user?.role || ''
+})
+
+function openPasswordDialog() {
+  Object.assign(passwordForm, { current: '', password: '', confirm: '' })
+  passwordDialog.value = true
+}
+
+async function savePassword() {
+  if (passwordForm.password.length < 6) {
+    ElMessage.warning('新密码至少 6 位')
+    return
+  }
+  if (passwordForm.password !== passwordForm.confirm) {
+    ElMessage.warning('两次输入的新密码不一致')
+    return
+  }
+  passwordSaving.value = true
+  try {
+    await auth.changePassword(passwordForm.current, passwordForm.password)
+    passwordDialog.value = false
+    ElMessage.success('密码修改成功')
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '密码修改失败')
+  } finally {
+    passwordSaving.value = false
+  }
+}
 
 async function handleLogout() {
   try {
@@ -52,7 +86,7 @@ async function handleLogout() {
         </div>
       </div>
 
-      <div class="edition">NEW SYSTEM · V1.0</div>
+      <div class="edition">{{ auth.isSystemAdmin ? 'NEW SYSTEM · V1.0' : '业务管理平台' }}</div>
 
       <ElMenu
         router
@@ -62,29 +96,29 @@ async function handleLogout() {
         text-color="#8fa4c4"
         active-text-color="#ffffff"
       >
-        <ElMenuItem index="/">
+        <ElMenuItem v-if="auth.can('dashboard.view')" index="/">
           <ElIcon><House /></ElIcon>
           <span>工作台</span>
         </ElMenuItem>
-        <ElMenuItem index="/analytics">
+        <ElMenuItem v-if="auth.can('analytics.view')" index="/analytics">
           <ElIcon><DataAnalysis /></ElIcon>
           <span>经营分析</span>
         </ElMenuItem>
 
         <div class="menu-section">业务模块</div>
-        <ElSubMenu index="express">
+        <ElSubMenu v-if="auth.can('express.view') || auth.can('express.run') || auth.can('express.configure')" index="express">
           <template #title>
             <ElIcon><DataLine /></ElIcon>
             <span>快递对账</span>
           </template>
-          <ElMenuItem index="/express"><ElIcon><House /></ElIcon><span>看板</span></ElMenuItem>
-          <ElMenuItem index="/express/run"><ElIcon><Operation /></ElIcon><span>运行</span></ElMenuItem>
-          <ElMenuItem index="/express/history"><ElIcon><Files /></ElIcon><span>历史</span></ElMenuItem>
-          <ElMenuItem index="/express/stats"><ElIcon><PieChart /></ElIcon><span>统计</span></ElMenuItem>
-          <ElMenuItem index="/express/config"><ElIcon><Setting /></ElIcon><span>配置</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.view')" index="/express"><ElIcon><House /></ElIcon><span>看板</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.run')" index="/express/run"><ElIcon><Operation /></ElIcon><span>运行</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.view')" index="/express/history"><ElIcon><Files /></ElIcon><span>历史</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.view')" index="/express/stats"><ElIcon><PieChart /></ElIcon><span>统计</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.configure')" index="/express/config"><ElIcon><Setting /></ElIcon><span>配置</span></ElMenuItem>
         </ElSubMenu>
 
-        <ElSubMenu index="query">
+        <ElSubMenu v-if="auth.can('query.view')" index="query">
           <template #title>
             <ElIcon><Search /></ElIcon>
             <span>数据查询</span>
@@ -92,20 +126,28 @@ async function handleLogout() {
           <ElMenuItem index="/query"><ElIcon><Document /></ElIcon><span>查询导出</span></ElMenuItem>
         </ElSubMenu>
 
-        <ElSubMenu index="finance">
+        <ElSubMenu v-if="auth.can('salary.view') || auth.can('reimbursement.view')" index="finance">
           <template #title>
             <ElIcon><Money /></ElIcon>
             <span>财务模块</span>
           </template>
-          <ElMenuItem index="/finance"><ElIcon><House /></ElIcon><span>模块首页</span></ElMenuItem>
-          <ElMenuItem index="/salary"><ElIcon><Wallet /></ElIcon><span>员工工资</span></ElMenuItem>
-          <ElMenuItem index="/reimbursement"><ElIcon><Document /></ElIcon><span>报销</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('salary.view')" index="/finance"><ElIcon><House /></ElIcon><span>模块首页</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('salary.view')" index="/salary"><ElIcon><Wallet /></ElIcon><span>员工工资</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('reimbursement.view')" index="/reimbursement"><ElIcon><Document /></ElIcon><span>报销</span></ElMenuItem>
         </ElSubMenu>
 
-        <ElMenuItem index="/storage">
+        <ElMenuItem v-if="auth.can('storage.view')" index="/storage">
           <ElIcon><Box /></ElIcon>
           <span>仓储费</span>
         </ElMenuItem>
+
+        <template v-if="auth.isSystemAdmin">
+          <div class="menu-section">系统管理</div>
+          <ElMenuItem index="/access">
+            <ElIcon><Lock /></ElIcon>
+            <span>账号与权限</span>
+          </ElMenuItem>
+        </template>
       </ElMenu>
 
       <div class="sidebar-footer">
@@ -126,8 +168,9 @@ async function handleLogout() {
           <div class="account-avatar"><User /></div>
           <div class="account-copy">
             <strong>{{ auth.user?.display_name }}</strong>
-            <span>{{ auth.user?.role === 'admin' ? '系统管理员' : auth.user?.role }}</span>
+            <span>{{ roleLabel }}</span>
           </div>
+          <ElButton text :icon="Key" @click="openPasswordDialog">修改密码</ElButton>
           <ElButton text :icon="SwitchButton" @click="handleLogout">退出</ElButton>
         </div>
       </header>
@@ -136,6 +179,15 @@ async function handleLogout() {
         <RouterView />
       </main>
     </section>
+
+    <ElDialog v-model="passwordDialog" title="修改登录密码" width="460px">
+      <ElForm label-position="top">
+        <ElFormItem label="当前密码"><ElInput v-model="passwordForm.current" type="password" show-password autocomplete="current-password" /></ElFormItem>
+        <ElFormItem label="新密码"><ElInput v-model="passwordForm.password" type="password" show-password autocomplete="new-password" /></ElFormItem>
+        <ElFormItem label="确认新密码"><ElInput v-model="passwordForm.confirm" type="password" show-password autocomplete="new-password" /></ElFormItem>
+      </ElForm>
+      <template #footer><ElButton @click="passwordDialog = false">取消</ElButton><ElButton type="primary" :loading="passwordSaving" @click="savePassword">保存</ElButton></template>
+    </ElDialog>
   </div>
 </template>
 

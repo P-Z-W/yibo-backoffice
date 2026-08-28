@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import require_permission
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.operations import QueryConfig
@@ -50,7 +50,7 @@ def serialize(row: QueryConfig) -> dict[str, object]:
 
 @router.get("/configs")
 def configs(
-    db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    db: Session = Depends(get_db), _: User = Depends(require_permission("query.view"))
 ) -> dict[str, object]:
     rows = db.scalars(
         select(QueryConfig).order_by(QueryConfig.group_name, QueryConfig.id.desc())
@@ -65,7 +65,7 @@ def configs(
 def add_config(
     payload: QueryConfigInput,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("query.configure")),
 ) -> dict[str, object]:
     if payload.sql_content.strip():
         validate_sql(payload.sql_content)
@@ -86,7 +86,7 @@ def save_config(
     config_id: int,
     payload: QueryConfigInput,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("query.configure")),
 ) -> dict[str, object]:
     target = db.get(QueryConfig, config_id)
     if target is None:
@@ -103,7 +103,7 @@ def save_config(
 def delete_config(
     config_id: int,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("query.configure")),
 ) -> None:
     if db.get(QueryConfig, config_id) is None:
         raise HTTPException(status_code=404, detail="查询配置不存在")
@@ -112,7 +112,9 @@ def delete_config(
 
 
 @router.post("/run")
-def run_export(entry_ids: list[int], user: User = Depends(get_current_user)) -> dict[str, object]:
+def run_export(
+    entry_ids: list[int], user: User = Depends(require_permission("query.run"))
+) -> dict[str, object]:
     ok, message = query_jobs.start_query_export(entry_ids, user.id)
     if not ok:
         raise HTTPException(status_code=409, detail=message)
@@ -120,12 +122,12 @@ def run_export(entry_ids: list[int], user: User = Depends(get_current_user)) -> 
 
 
 @router.get("/status")
-def export_status(_: User = Depends(get_current_user)) -> dict[str, object]:
+def export_status(_: User = Depends(require_permission("query.run"))) -> dict[str, object]:
     return dict(query_jobs.state)
 
 
 @router.get("/logs")
-def logs(_: User = Depends(get_current_user)) -> StreamingResponse:
+def logs(_: User = Depends(require_permission("query.run"))) -> StreamingResponse:
     def generate():
         while True:
             try:
@@ -140,12 +142,16 @@ def logs(_: User = Depends(get_current_user)) -> StreamingResponse:
 
 
 @router.get("/history")
-def history(_: User = Depends(get_current_user)) -> list[dict[str, object]]:
+def history(_: User = Depends(require_permission("query.view"))) -> list[dict[str, object]]:
     return query_jobs.history()
 
 
 @router.get("/download/{day}/{filename}")
-def download(day: str, filename: str, _: User = Depends(get_current_user)) -> FileResponse:
+def download(
+    day: str,
+    filename: str,
+    _: User = Depends(require_permission("query.download")),
+) -> FileResponse:
     safe_day = Path(day).name
     safe_name = Path(filename).name
     if safe_day != day or safe_name != filename or not safe_name.endswith(".xlsx"):

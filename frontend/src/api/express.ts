@@ -7,6 +7,7 @@ export interface ExpressStats {
   unmatched_orders: number
   total_amount: number
   team_stats: Array<{ team: string; amount: number; count: number }>
+  team_summary: TeamSummary[]
   express_stats: Array<{ name: string; amount: number; count: number; pct: number }>
   anomalies: Array<{ type: string; level: string; count: number; pct: number; samples: string[] }>
 }
@@ -25,6 +26,7 @@ export interface ExpressHistory {
   month: string
   run_count: number
   last_result: string
+  last_time: string
   last_duration: string
   file_count: number
   size_bytes: number
@@ -37,6 +39,39 @@ export interface ExpressJob {
   period: string
   elapsed: string
   message: string
+  step: number
+  progress: number
+}
+
+export interface TeamSummary {
+  team: string
+  single_amount: number
+  average_count: number
+  total_amount: number
+}
+
+export interface UnmatchedSummary {
+  ok: boolean
+  month: string
+  total: number
+  matched: number
+  unmatched: number
+  ratio: number
+  by_express: Record<string, number>
+  samples: string[]
+}
+
+export interface ExpressPreview {
+  ok: boolean
+  month: string
+  total: number
+  matched: number
+  unmatched: number
+  filtered: number
+  page: number
+  size: number
+  total_pages: number
+  rows: Array<Record<string, string | number | null>>
 }
 
 export interface TeamPrice {
@@ -61,6 +96,24 @@ export async function getExpressStats(month: string) {
 
 export async function getExpressHistory() {
   return (await http.get<ExpressHistory[]>('/express/history')).data
+}
+
+export async function getUnmatchedSummary(month: string) {
+  return (await http.get<UnmatchedSummary>(`/express/unmatched/${month}`)).data
+}
+
+export async function getExpressPreview(
+  month: string,
+  page = 1,
+  size = 100,
+  filter = 'all',
+  keyword = '',
+) {
+  return (
+    await http.get<ExpressPreview>(`/express/preview/${month}`, {
+      params: { page, size, filter, keyword },
+    })
+  ).data
 }
 
 export async function uploadExpressFile(month: string, file: File) {

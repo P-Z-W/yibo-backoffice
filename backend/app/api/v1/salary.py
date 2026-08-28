@@ -12,7 +12,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import require_permission
 from app.db.session import get_db
 from app.models.operations import SalaryRecord
 from app.models.user import User
@@ -43,7 +43,7 @@ def serialize(row: SalaryRecord) -> dict[str, object]:
 def list_salary(
     month: str = "",
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("salary.view")),
 ) -> dict[str, object]:
     statement = select(SalaryRecord)
     if month:
@@ -68,7 +68,7 @@ def list_salary(
 def add_salary(
     payload: SalaryInput,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("salary.manage")),
 ) -> dict[str, object]:
     target = SalaryRecord(**payload.model_dump())
     target.note = payload.note.strip() or None
@@ -83,7 +83,7 @@ def save_salary(
     record_id: int,
     payload: SalaryInput,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("salary.manage")),
 ) -> dict[str, object]:
     target = db.get(SalaryRecord, record_id)
     if target is None:
@@ -99,7 +99,7 @@ def save_salary(
 def delete_salary(
     record_id: int,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("salary.manage")),
 ) -> None:
     if db.get(SalaryRecord, record_id) is None:
         raise HTTPException(status_code=404, detail="工资记录不存在")
@@ -111,7 +111,7 @@ def delete_salary(
 def export_salary(
     month: str = "",
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("salary.export")),
 ) -> StreamingResponse:
     statement = select(SalaryRecord)
     if month:
