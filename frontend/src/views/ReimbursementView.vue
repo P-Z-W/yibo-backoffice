@@ -17,23 +17,29 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   approveReimbursement,
   createReimbursement,
+  createReimbursementEntity,
   deleteReimbursement,
   deleteReimbursementAttachment,
   exportReimbursements,
   getReimbursement,
+  getReimbursementEntities,
   getReimbursements,
   importBatchReimbursements,
   markReimbursementsExported,
   previewBatchReimbursementImport,
   previewReimbursementImport,
+  retryReimbursementInvoiceRecognition,
   returnReimbursement,
   saveReimbursementConfig,
   submitReimbursement,
   updateReimbursement,
+  updateReimbursementEntity,
+  updateReimbursementInvoice,
   uploadReimbursementAttachment,
   type ApprovalRecord,
   type BatchImportPreview,
   type ReimbursementAttachment,
+  type ReimbursementEntity,
   type ReimbursementItem,
   type ReimbursementPayload,
   type ReimbursementRecord,
@@ -55,6 +61,9 @@ const config = reactive({
   finance_approval_enabled: false,
   teams: ['发货组', '退货组'],
   expense_categories: ['临时运费', '退件运费', '其他'],
+  entities: [] as ReimbursementEntity[],
+  invoice_ocr_available: false,
+  invoice_ocr_provider: 'baidu',
 })
 const permissions = reactive({ can_configure: false, can_export: false })
 const filters = reactive({ view: 'all', team: '', keyword: '', dateRange: [] as string[] })
@@ -65,13 +74,15 @@ const submitting = ref(false)
 const editorId = ref<number>()
 const autoSaveText = ref('')
 const existingAttachments = ref<ReimbursementAttachment[]>([])
-const uploadQueue = ref<File[]>([])
+const uploadQueue = ref<Array<{ file: File; documentType: 'invoice' | 'voucher' }>>([])
 const uploading = ref(false)
 const pasteVisible = ref(false)
 const pasteText = ref('')
 const form = reactive<ReimbursementPayload>({
   applicant_name: '',
   team: '发货组',
+  entity_name: '',
+  tax_number: '',
   note: '',
   items: [],
 })
@@ -82,6 +93,14 @@ const detail = ref<ReimbursementRecord>()
 const configVisible = ref(false)
 const configSaving = ref(false)
 const financeApprovalDraft = ref(false)
+const entityRows = ref<ReimbursementEntity[]>([])
+const entitySavingId = ref<number>()
+const newEntity = reactive({
+  name: '',
+  tax_number: '',
+  is_default: false,
+  is_active: true,
+})
 const batchVisible = ref(false)
 const batchFile = ref<File>()
 const batchFileName = ref('')
@@ -95,6 +114,19 @@ let keywordTimer: number | undefined
 
 const totalAmount = computed(() =>
   form.items.reduce((total, item) => total + Number(item.amount || 0), 0),
+)
+const invoiceAttachments = computed(() =>
+  existingAttachments.value.filter((item) => item.document_type === 'invoice'),
+)
+const voucherAttachments = computed(() =>
+  existingAttachments.value.filter((item) => item.document_type !== 'invoice'),
+)
+const invoiceAmount = computed(() =>
+  invoiceAttachments.value.reduce((total, item) => total + Number(item.invoice?.amount || 0), 0),
+)
+const invoiceDifference = computed(() => totalAmount.value - invoiceAmount.value)
+const pendingInvoiceCount = computed(
+  () => uploadQueue.value.filter((item) => item.documentType === 'invoice').length,
 )
 const hasSubstance = computed(
   () =>
@@ -176,6 +208,9 @@ function resetForm() {
   editorId.value = undefined
   form.applicant_name = auth.user?.display_name || ''
   form.team = auth.user?.team || '发货组'
+  const defaultEntity = config.entities.find((item) => item.is_default) || config.entities[0]
+  form.entity_name = defaultEntity?.name || ''
+  form.tax_number = defaultEntity?.tax_number || ''
   form.note = ''
   form.items = [newItem()]
   existingAttachments.value = []
@@ -196,6 +231,8 @@ async function openEdit(row: ReimbursementRecord) {
     editorId.value = data.id
     form.applicant_name = data.applicant_name
     form.team = data.team
+    form.entity_name = data.entity_name
+    form.tax_number = data.tax_number
     form.note = data.note
     form.items = (data.items || []).map((item) => newItem(item))
     existingAttachments.value = data.attachments || []
@@ -212,6 +249,8 @@ function payload(): ReimbursementPayload {
   return {
     applicant_name: form.applicant_name.trim(),
     team: form.team,
+    entity_name: form.entity_name.trim(),
+    tax_number: form.tax_number.trim().toUpperCase().replaceAll(' ', ''),
     note: form.note.trim(),
     items: form.items.map((item) => ({
       expense_date: item.expense_date,
@@ -277,6 +316,8 @@ async function submit() {
     (item) => !item.expense_date || !item.category.trim() || Number(item.amount) <= 0,
   )
   if (!form.applicant_name.trim()) return ElMessage.warning('请输入报销人')
+  if (!form.entity_name.trim()) return ElMessage.warning('请选择或填写报销主体')
+  if (!form.tax_number.trim()) return ElMessage.warning('请填写报销主体税号')
   if (invalidIndex >= 0) return ElMessage.warning(`请完善第 ${invalidIndex + 1} 条明细，金额必须大于 0`)
   submitting.value = true
   window.clearTimeout(autoSaveTimer)
@@ -318,12 +359,25 @@ async function removeDraft() {
   }
 }
 
-async function queueAttachment(file: File) {
+async function queueAttachment(file: File, documentType: 'invoice' | 'voucher' = 'voucher') {
+  const suffix = file.name.includes('.') ? `.${file.name.split('.').pop()?.toLowerCase()}` : ''
+  const allowedSuffixes =
+    documentType === 'invoice'
+      ? ['.jpg', '.jpeg', '.png', '.webp', '.pdf']
+      : ['.jpg', '.jpeg', '.png', '.webp', '.pdf', '.xlsx']
+  if (!allowedSuffixes.includes(suffix)) {
+    ElMessage.warning(
+      documentType === 'invoice'
+        ? `${file.name} 不是支持的发票格式，请上传图片或 PDF`
+        : `${file.name} 不是支持的凭证格式`,
+    )
+    return
+  }
   if (file.size > 10 * 1024 * 1024) {
     ElMessage.warning(`${file.name} 超过 10MB，未加入上传`)
     return
   }
-  uploadQueue.value.push(file)
+  uploadQueue.value.push({ file, documentType })
   await processUploadQueue()
 }
 
@@ -336,11 +390,29 @@ async function processUploadQueue() {
       if (!saved) return
     }
     while (uploadQueue.value.length && editorId.value) {
-      const file = uploadQueue.value[0]
+      const queued = uploadQueue.value[0]
+      const file = queued.file
       try {
-        const result = await uploadReimbursementAttachment(editorId.value, file)
+        const result = await uploadReimbursementAttachment(
+          editorId.value,
+          file,
+          queued.documentType,
+        )
         existingAttachments.value.push(result)
         if (result.duplicate) ElMessage.warning(`${file.name} 与历史报销凭证重复，请核对`)
+        if (result.invoice) {
+          if (!form.entity_name && result.invoice.entity_name) {
+            form.entity_name = result.invoice.entity_name
+          }
+          if (!form.tax_number && result.invoice.tax_number) {
+            form.tax_number = result.invoice.tax_number
+          }
+          if (result.invoice.recognition_status === 'success') {
+            ElMessage.success(`${file.name} 发票识别完成，请核对后提交`)
+          } else {
+            ElMessage.warning(result.invoice.recognition_message || '请手动确认发票信息')
+          }
+        }
       } catch (error) {
         ElMessage.error(`${file.name}：${errorText(error)}`)
       } finally {
@@ -353,7 +425,11 @@ async function processUploadQueue() {
 }
 
 function onAttachmentChange(file: { raw?: File }) {
-  if (file.raw) void queueAttachment(file.raw)
+  if (file.raw) void queueAttachment(file.raw, 'voucher')
+}
+
+function onInvoiceChange(file: { raw?: File }) {
+  if (file.raw) void queueAttachment(file.raw, 'invoice')
 }
 
 async function removeAttachment(item: ReimbursementAttachment) {
@@ -380,6 +456,82 @@ function handlePaste(event: ClipboardEvent) {
     void queueAttachment(named)
   })
   ElMessage.success(`已识别 ${files.length} 张粘贴图片`)
+}
+
+function onEntityChange(value: string) {
+  const entity = config.entities.find((item) => item.name === value)
+  if (entity) form.tax_number = entity.tax_number
+}
+
+function replaceAttachment(updated: ReimbursementAttachment) {
+  const index = existingAttachments.value.findIndex((item) => item.id === updated.id)
+  if (index >= 0) existingAttachments.value[index] = updated
+}
+
+async function saveInvoice(item: ReimbursementAttachment) {
+  if (!editorId.value || !item.invoice) return
+  try {
+    const updated = await updateReimbursementInvoice(editorId.value, item.invoice.id, {
+      entity_name: item.invoice.entity_name.trim(),
+      tax_number: item.invoice.tax_number.trim().toUpperCase().replaceAll(' ', ''),
+      amount: item.invoice.amount === null ? null : Number(item.invoice.amount),
+    })
+    replaceAttachment(updated)
+    ElMessage.success('发票识别结果已确认')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+async function retryInvoice(item: ReimbursementAttachment) {
+  if (!editorId.value || !item.invoice) return
+  try {
+    const updated = await retryReimbursementInvoiceRecognition(editorId.value, item.invoice.id)
+    replaceAttachment(updated)
+    ElMessage.success(updated.invoice?.recognition_message || '重新识别完成')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+function applyInvoice(item: ReimbursementAttachment) {
+  if (!item.invoice) return
+  if (item.invoice.entity_name) form.entity_name = item.invoice.entity_name
+  if (item.invoice.tax_number) form.tax_number = item.invoice.tax_number
+  const amount = Number(item.invoice.amount || 0)
+  if (amount > 0) {
+    const blank = form.items.length === 1 && Number(form.items[0].amount || 0) === 0
+    if (blank) form.items[0].amount = amount
+    else {
+      const row = newItem()
+      row.amount = amount
+      row.description = item.invoice.invoice_number
+        ? `发票 ${item.invoice.invoice_number}`
+        : '发票识别金额'
+      form.items.push(row)
+    }
+  }
+  ElMessage.success('已将发票主体、税号和金额填入报销单，可继续修改')
+}
+
+function invoiceStatusType(item: ReimbursementAttachment) {
+  if (item.invoice?.recognition_status === 'success' || item.invoice?.recognition_status === 'confirmed') {
+    return 'success'
+  }
+  if (item.invoice?.recognition_status === 'failed') return 'danger'
+  return 'warning'
+}
+
+function invoiceStatusLabel(item: ReimbursementAttachment) {
+  const labels: Record<string, string> = {
+    pending: '识别中',
+    success: '识别成功',
+    confirmed: '人工确认',
+    needs_review: '需要确认',
+    failed: '识别失败',
+    unconfigured: '手工填写',
+  }
+  return labels[item.invoice?.recognition_status || ''] || '等待确认'
 }
 
 async function onImportChange(file: { raw?: File }) {
@@ -439,14 +591,20 @@ async function openDetail(row: ReimbursementRecord) {
 
 async function approveCurrent() {
   if (!detail.value) return
+  const approvalStage = detail.value.status
+  const approvalName = approvalStage === 'pending_finance' ? '财务审批' : '主管审批'
   try {
-    const result = await ElMessageBox.prompt('可以填写审批意见，也可以直接通过。', '审批通过', {
+    const result = await ElMessageBox.prompt('可以填写审批意见，也可以直接通过。', `${approvalName}通过`, {
       confirmButtonText: '确认通过',
       cancelButtonText: '取消',
       inputPlaceholder: '审批意见（选填）',
     })
     detail.value = await approveReimbursement(detail.value.id, result.value)
-    ElMessage.success(detail.value.status === 'pending_finance' ? '已交财务审批' : '审批已完成，可导出')
+    ElMessage.success(
+      detail.value.status === 'pending_finance'
+        ? '主管审批已通过，已进入财务在线审批'
+        : `${approvalName}已通过，审批流程已完成`,
+    )
     await load()
   } catch (error) {
     const message = errorText(error)
@@ -539,9 +697,53 @@ async function confirmBatchImport() {
   }
 }
 
-function openConfig() {
+async function openConfig() {
   financeApprovalDraft.value = config.finance_approval_enabled
+  try {
+    entityRows.value = await getReimbursementEntities(true)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
   configVisible.value = true
+}
+
+async function addEntity() {
+  if (!newEntity.name.trim() || !newEntity.tax_number.trim()) {
+    return ElMessage.warning('请填写主体名称和税号')
+  }
+  try {
+    await createReimbursementEntity({
+      name: newEntity.name.trim(),
+      tax_number: newEntity.tax_number.trim().toUpperCase().replaceAll(' ', ''),
+      is_default: newEntity.is_default,
+      is_active: true,
+    })
+    Object.assign(newEntity, { name: '', tax_number: '', is_default: false, is_active: true })
+    entityRows.value = await getReimbursementEntities(true)
+    config.entities = entityRows.value.filter((item) => item.is_active)
+    ElMessage.success('报销主体已添加')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+async function saveEntity(row: ReimbursementEntity) {
+  entitySavingId.value = row.id
+  try {
+    await updateReimbursementEntity(row.id, {
+      name: row.name.trim(),
+      tax_number: row.tax_number.trim().toUpperCase().replaceAll(' ', ''),
+      is_default: row.is_default,
+      is_active: row.is_active,
+    })
+    entityRows.value = await getReimbursementEntities(true)
+    config.entities = entityRows.value.filter((item) => item.is_active)
+    ElMessage.success('报销主体已保存')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    entitySavingId.value = undefined
+  }
 }
 
 async function saveConfig() {
@@ -566,7 +768,7 @@ function approvalTitle(record: ApprovalRecord) {
     supervisor_approve: '主管审批通过',
     finance_approve: '财务审批通过',
     return: '退回修改',
-    export: '导出给财务',
+    export: '导出报销数据',
   }
   return labels[record.action] || record.action
 }
@@ -594,7 +796,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page-heading">
-    <div><h1>报销管理</h1><p>员工快速录入，主管审批后统一导出给财务。</p></div>
+    <div><h1>报销管理</h1><p>主管、财务在系统内完成审批；导入和导出独立使用，不影响审批状态。</p></div>
     <div class="page-actions">
       <ElButton v-if="permissions.can_configure" :icon="Setting" @click="openConfig">流程设置</ElButton>
       <ElButton v-if="permissions.can_export" :icon="Download" @click="exportSelected">导出数据</ElButton>
@@ -644,11 +846,13 @@ onBeforeUnmount(() => {
     <template #header><div class="drawer-title"><div><h2>{{ editorId ? '编辑报销单' : '新建报销' }}</h2><p>{{ editorId ? `可随时关闭，数据不会丢失` : '填写任意金额后自动保存草稿' }}</p></div><ElTag v-if="autoSaveText" type="info" effect="plain">{{ autoSaveText }}</ElTag></div></template>
     <div class="editor-content">
       <section class="editor-section basic-section">
-        <div class="section-heading"><div><h3>基本信息</h3><p>报销人和所属组会自动带出，也可以直接修改。</p></div></div>
+        <div class="section-heading"><div><h3>基本信息</h3><p>主体和税号可以由发票识别自动带出，也可以随时手动修改。</p></div></div>
         <div class="basic-grid">
           <ElFormItem label="报销人"><ElInput v-model="form.applicant_name" placeholder="请输入姓名" /></ElFormItem>
           <ElFormItem label="所属组"><ElSelect v-model="form.team"><ElOption v-for="team in config.teams" :key="team" :label="team" :value="team" /></ElSelect></ElFormItem>
-          <ElFormItem label="整单说明"><ElInput v-model="form.note" placeholder="选填，例如本周退件运费汇总" /></ElFormItem>
+          <ElFormItem label="主体" class="span-2"><ElSelect v-model="form.entity_name" filterable allow-create default-first-option placeholder="选择或直接填写购买方主体" @change="onEntityChange"><ElOption v-for="entity in config.entities" :key="entity.id" :label="entity.name" :value="entity.name"><span>{{ entity.name }}</span><small class="entity-option-tax">{{ entity.tax_number }}</small></ElOption></ElSelect></ElFormItem>
+          <ElFormItem label="税号" class="span-2"><ElInput v-model="form.tax_number" placeholder="购买方纳税人识别号，可手动修改" /></ElFormItem>
+          <ElFormItem label="整单说明" class="span-2"><ElInput v-model="form.note" placeholder="选填，例如本周退件运费汇总" /></ElFormItem>
         </div>
       </section>
 
@@ -673,12 +877,53 @@ onBeforeUnmount(() => {
         <div class="entry-footer"><ElButton text type="primary" :icon="Plus" @click="addRow()">添加一行</ElButton><div>共 {{ form.items.length }} 条明细 <span>合计</span><strong>¥ {{ formatMoney(totalAmount) }}</strong></div></div>
       </section>
 
-      <section class="editor-section attachment-section">
-        <div class="section-heading"><div><h3>凭证附件</h3><p>支持图片、PDF、XLSX；可直接在此页面按 Ctrl+V 粘贴微信截图。</p></div><ElUpload multiple :auto-upload="false" :show-file-list="false" accept=".jpg,.jpeg,.png,.webp,.pdf,.xlsx" :on-change="onAttachmentChange"><ElButton :loading="uploading" :icon="Paperclip">选择附件</ElButton></ElUpload></div>
-        <div v-if="existingAttachments.length" class="attachment-list">
-          <a v-for="item in existingAttachments" :key="item.id" :href="item.url" target="_blank" rel="noreferrer" class="attachment-item"><div class="file-icon"><Paperclip /></div><div><strong>{{ item.original_name }}</strong><span>{{ formatSize(item.size_bytes) }}</span></div><ElButton text type="danger" :icon="Close" @click.prevent="removeAttachment(item)" /></a>
+      <section class="editor-section invoice-section">
+        <div class="section-heading"><div><h3>发票识别</h3><p>支持一次选择或拖入多张发票，系统按顺序上传识别；所有结果均可修改。</p></div></div>
+        <ElUpload
+          drag
+          multiple
+          :auto-upload="false"
+          :show-file-list="false"
+          accept=".jpg,.jpeg,.png,.webp,.pdf"
+          :on-change="onInvoiceChange"
+          class="invoice-drop-upload"
+        >
+          <ElIcon class="invoice-upload-icon"><UploadFilled /></ElIcon>
+          <div class="invoice-upload-copy">
+            <strong>拖拽多张发票到这里</strong>
+            <span>或点击批量选择图片 / PDF</span>
+          </div>
+          <template #tip>
+            <div class="invoice-upload-tip">
+              <span>支持 JPG、PNG、WEBP、PDF，单个文件不超过 10MB</span>
+              <strong v-if="pendingInvoiceCount">正在上传识别 {{ pendingInvoiceCount }} 个文件…</strong>
+            </div>
+          </template>
+        </ElUpload>
+        <ElAlert v-if="!config.invoice_ocr_available" title="发票识别服务尚未配置：文件仍可正常上传，主体、税号和金额可以在下方手工填写并确认。" type="warning" :closable="false" show-icon />
+        <div v-if="invoiceAttachments.length" class="invoice-summary"><div><span>发票</span><strong>{{ invoiceAttachments.length }} 张</strong></div><div><span>识别金额</span><strong>¥ {{ formatMoney(invoiceAmount) }}</strong></div><div :class="{ mismatch: Math.abs(invoiceDifference) > 0.009 }"><span>与报销金额差异</span><strong>¥ {{ formatMoney(invoiceDifference) }}</strong></div></div>
+        <div v-if="invoiceAttachments.length" class="invoice-list">
+          <article v-for="item in invoiceAttachments" :key="item.id" class="invoice-card">
+            <div class="invoice-card-head"><div><a :href="item.url" target="_blank" rel="noreferrer"><Paperclip />{{ item.original_name }}</a><span>{{ formatSize(item.size_bytes) }}<template v-if="item.invoice?.invoice_number"> · 发票号 {{ item.invoice.invoice_number }}</template></span></div><div><ElTag :type="invoiceStatusType(item)" effect="light">{{ invoiceStatusLabel(item) }}</ElTag><ElButton text type="danger" :icon="Close" @click="removeAttachment(item)" /></div></div>
+            <template v-if="item.invoice">
+              <div class="invoice-fields">
+                <ElFormItem label="主体"><ElInput v-model="item.invoice.entity_name" placeholder="识别失败时可手工填写" /></ElFormItem>
+                <ElFormItem label="税号"><ElInput v-model="item.invoice.tax_number" placeholder="可手工修改" /></ElFormItem>
+                <ElFormItem label="价税合计"><ElInputNumber v-model="item.invoice.amount" :min="0" :precision="2" :controls="false"><template #prefix>¥</template></ElInputNumber></ElFormItem>
+              </div>
+              <div class="invoice-card-foot"><div><span>{{ item.invoice.recognition_message }}</span><small v-if="item.invoice.manually_edited">原始识别：{{ item.invoice.recognized_entity_name || '—' }} · {{ item.invoice.recognized_tax_number || '—' }} · ¥{{ formatMoney(item.invoice.recognized_amount || 0) }}</small></div><div><ElButton @click="retryInvoice(item)">重新识别</ElButton><ElButton @click="applyInvoice(item)">填入报销单</ElButton><ElButton type="primary" @click="saveInvoice(item)">确认修改</ElButton></div></div>
+            </template>
+          </article>
         </div>
-        <ElEmpty v-else :image-size="46" description="暂无附件，可选择文件或直接粘贴截图" />
+        <ElEmpty v-else :image-size="46" description="暂无发票，上传后自动识别；也可以不上传直接手工填写主体和税号" />
+      </section>
+
+      <section class="editor-section attachment-section">
+        <div class="section-heading"><div><h3>其他凭证</h3><p>付款截图、聊天记录和其他说明文件不做发票识别；也可按 Ctrl+V 粘贴截图。</p></div><ElUpload multiple :auto-upload="false" :show-file-list="false" accept=".jpg,.jpeg,.png,.webp,.pdf,.xlsx" :on-change="onAttachmentChange"><ElButton :loading="uploading" :icon="Paperclip">选择其他凭证</ElButton></ElUpload></div>
+        <div v-if="voucherAttachments.length" class="attachment-list">
+          <a v-for="item in voucherAttachments" :key="item.id" :href="item.url" target="_blank" rel="noreferrer" class="attachment-item"><div class="file-icon"><Paperclip /></div><div><strong>{{ item.original_name }}</strong><span>{{ formatSize(item.size_bytes) }}</span></div><ElButton text type="danger" :icon="Close" @click.prevent="removeAttachment(item)" /></a>
+        </div>
+        <ElEmpty v-else :image-size="46" description="暂无其他凭证，可选择文件或直接粘贴截图" />
       </section>
     </div>
     <template #footer><div class="drawer-footer"><ElButton v-if="editorId" type="danger" text :icon="Delete" @click="removeDraft">删除草稿</ElButton><span v-else /><div><ElButton @click="editorVisible = false">稍后填写</ElButton><ElButton :loading="editorSaving" @click="saveDraft()">保存草稿</ElButton><ElButton type="primary" :loading="submitting" :icon="Check" @click="submit">提交主管审批</ElButton></div></div></template>
@@ -686,12 +931,13 @@ onBeforeUnmount(() => {
 
   <ElDrawer v-model="detailVisible" size="min(780px, 92vw)" title="报销单详情">
     <div v-loading="detailLoading" class="detail-content"><template v-if="detail">
-      <section class="detail-hero"><div><span>{{ detail.number }}</span><h2>¥ {{ formatMoney(detail.total_amount) }}</h2><p>{{ detail.applicant_name }} · {{ detail.team }} · {{ detail.item_count }} 条明细</p></div><ElTag :type="statusType(detail)" size="large" effect="light" round>{{ detail.status_label }}</ElTag></section>
+      <section class="detail-hero"><div><span>{{ detail.number }}</span><h2>¥ {{ formatMoney(detail.total_amount) }}</h2><p>{{ detail.applicant_name }} · {{ detail.team }} · {{ detail.item_count }} 条明细</p><small>{{ detail.entity_name || '未填写主体' }} · {{ detail.tax_number || '未填写税号' }}</small></div><ElTag :type="statusType(detail)" size="large" effect="light" round>{{ detail.status_label }}</ElTag></section>
       <section class="detail-block"><div class="block-title"><h3>费用明细</h3><span>合计 ¥ {{ formatMoney(detail.total_amount) }}</span></div><ElTable :data="detail.items || []" size="small"><ElTableColumn prop="expense_date" label="日期" width="105" /><ElTableColumn prop="category" label="类别" min-width="130" /><ElTableColumn prop="related_number" label="关联单号" min-width="150" show-overflow-tooltip /><ElTableColumn prop="description" label="说明" min-width="140" show-overflow-tooltip /><ElTableColumn label="金额" width="110" align="right"><template #default="{ row }">¥ {{ formatMoney(row.amount) }}</template></ElTableColumn></ElTable><div v-if="detail.note" class="detail-note"><span>整单说明</span>{{ detail.note }}</div></section>
-      <section class="detail-block"><div class="block-title"><h3>凭证附件</h3><span>{{ detail.attachment_count }} 个</span></div><div v-if="detail.attachments?.length" class="detail-files"><a v-for="item in detail.attachments" :key="item.id" :href="item.url" target="_blank" rel="noreferrer"><Paperclip />{{ item.original_name }}</a></div><ElEmpty v-else :image-size="40" description="未上传附件" /></section>
+      <section class="detail-block"><div class="block-title"><h3>发票核对</h3><span>{{ detail.invoice_count }} 张 · 识别 ¥ {{ formatMoney(detail.invoice_amount) }}</span></div><ElAlert v-if="detail.invoice_count && Math.abs(detail.invoice_amount_difference) > 0.009" :title="`发票识别金额与报销金额相差 ¥${formatMoney(detail.invoice_amount_difference)}，请审批人核对。`" type="warning" :closable="false" show-icon /><div v-if="detail.attachments?.some((item) => item.invoice)" class="detail-invoices"><div v-for="item in detail.attachments.filter((value) => value.invoice)" :key="item.id"><a :href="item.url" target="_blank" rel="noreferrer"><Paperclip />{{ item.original_name }}</a><p>{{ item.invoice?.entity_name || '未填写主体' }} · {{ item.invoice?.tax_number || '未填写税号' }}</p><strong>¥ {{ formatMoney(item.invoice?.amount || 0) }}</strong><ElTag v-if="item.invoice?.manually_edited" type="warning" effect="plain">人工修改</ElTag><ElTag v-else :type="invoiceStatusType(item)" effect="plain">{{ invoiceStatusLabel(item) }}</ElTag></div></div><ElEmpty v-else :image-size="40" description="未上传发票" /></section>
+      <section class="detail-block"><div class="block-title"><h3>其他凭证</h3><span>{{ detail.attachments?.filter((item) => item.document_type !== 'invoice').length || 0 }} 个</span></div><div v-if="detail.attachments?.some((item) => item.document_type !== 'invoice')" class="detail-files"><a v-for="item in detail.attachments.filter((value) => value.document_type !== 'invoice')" :key="item.id" :href="item.url" target="_blank" rel="noreferrer"><Paperclip />{{ item.original_name }}</a></div><ElEmpty v-else :image-size="40" description="未上传其他凭证" /></section>
       <section class="detail-block"><div class="block-title"><h3>审批记录</h3><span>{{ detail.approval_records?.length || 0 }} 条</span></div><ElTimeline class="approval-timeline"><ElTimelineItem v-for="record in [...(detail.approval_records || [])].reverse()" :key="record.id" :timestamp="formatDateTime(record.created_at)" placement="top" :type="record.action === 'return' ? 'danger' : record.action.includes('approve') ? 'success' : 'primary'"><strong>{{ approvalTitle(record) }}</strong><p>{{ record.actor_name }}<template v-if="record.comment"> · {{ record.comment }}</template></p></ElTimelineItem></ElTimeline></section>
     </template></div>
-    <template v-if="detail" #footer><div class="detail-footer"><ElButton v-if="detail.can_edit" :icon="Edit" @click="openEdit(detail)">编辑报销单</ElButton><span v-else /><div v-if="detail.can_approve"><ElButton type="danger" plain @click="returnCurrent">退回修改</ElButton><ElButton type="primary" :icon="Check" @click="approveCurrent">审批通过</ElButton></div></div></template>
+    <template v-if="detail" #footer><div class="detail-footer"><ElButton v-if="detail.can_edit" :icon="Edit" @click="openEdit(detail)">编辑报销单</ElButton><span v-else /><div v-if="detail.can_approve"><ElButton type="danger" plain @click="returnCurrent">退回修改</ElButton><ElButton type="primary" :icon="Check" @click="approveCurrent">{{ detail.status === 'pending_finance' ? '财务审批通过' : '主管审批通过' }}</ElButton></div></div></template>
   </ElDrawer>
 
   <ElDialog v-model="batchVisible" title="Excel 批量导入报销" width="900px" :close-on-click-modal="false">
@@ -747,6 +993,7 @@ onBeforeUnmount(() => {
         <ElTableColumn prop="group_key" label="报销分组" width="120" />
         <ElTableColumn prop="applicant_name" label="报销人" min-width="120" />
         <ElTableColumn prop="team" label="所属组" width="100" />
+        <ElTableColumn prop="entity_name" label="主体" min-width="160" show-overflow-tooltip />
         <ElTableColumn prop="item_count" label="明细" width="80" align="center" />
         <ElTableColumn label="合计金额" width="140" align="right"><template #default="{ row }">¥ {{ formatMoney(row.total_amount) }}</template></ElTableColumn>
         <ElTableColumn label="校验" width="110" align="center"><template #default="{ row }"><ElTag :type="row.valid ? 'success' : 'danger'" effect="light">{{ row.valid ? '可导入' : '有问题' }}</ElTag></template></ElTableColumn>
@@ -772,15 +1019,25 @@ onBeforeUnmount(() => {
     <template #footer><ElButton @click="pasteVisible = false">取消</ElButton><ElButton type="primary" @click="applyPaste">识别并填入</ElButton></template>
   </ElDialog>
 
-  <ElDialog v-model="configVisible" title="报销流程设置" width="560px">
-    <div class="flow-preview"><div><span>1</span><strong>员工提交</strong></div><i /><div><span>2</span><strong>主管审批</strong></div><i /><div :class="{ disabled: !financeApprovalDraft }"><span>3</span><strong>财务审批</strong></div><i /><div><span>✓</span><strong>待导出</strong></div></div>
-    <div class="config-row"><div><strong>启用财务审批</strong><p>关闭时，主管通过后直接进入“待导出”；开启后需要财务再次审批。</p></div><ElSwitch v-model="financeApprovalDraft" /></div>
-    <ElAlert title="流程设置只影响之后提交的报销单，审批中的单据保持原流程。" type="info" :closable="false" show-icon />
+  <ElDialog v-model="configVisible" title="报销流程与主体设置" width="820px">
+    <div class="flow-preview"><div><span>1</span><strong>员工提交</strong></div><i /><div><span>2</span><strong>主管审批</strong></div><i /><div :class="{ disabled: !financeApprovalDraft }"><span>3</span><strong>财务在线审批</strong></div><i /><div><span>✓</span><strong>审批完成</strong></div></div>
+    <div class="config-row"><div><strong>启用财务在线审批</strong><p>关闭时，主管通过后审批完成；开启时，主管通过后由财务角色直接在本系统继续审批。</p></div><ElSwitch v-model="financeApprovalDraft" /></div>
+    <ElAlert title="导入、导出是独立的数据交换功能，不属于审批步骤；任意状态的单据都可导出。流程设置只影响之后提交的报销单。" type="info" :closable="false" show-icon />
+    <div class="entity-config-head"><div><strong>报销主体档案</strong><p>员工选择主体后自动带出税号，仍然可以在报销单中手动修改。</p></div><ElTag :type="config.invoice_ocr_available ? 'success' : 'warning'" effect="plain">{{ config.invoice_ocr_available ? '发票OCR已配置' : '发票OCR未配置' }}</ElTag></div>
+    <ElTable :data="entityRows" border size="small" class="entity-table">
+      <ElTableColumn label="主体名称" min-width="230"><template #default="{ row }"><ElInput v-model="row.name" /></template></ElTableColumn>
+      <ElTableColumn label="税号" min-width="220"><template #default="{ row }"><ElInput v-model="row.tax_number" /></template></ElTableColumn>
+      <ElTableColumn label="默认" width="75" align="center"><template #default="{ row }"><ElCheckbox v-model="row.is_default" /></template></ElTableColumn>
+      <ElTableColumn label="启用" width="75" align="center"><template #default="{ row }"><ElSwitch v-model="row.is_active" /></template></ElTableColumn>
+      <ElTableColumn label="操作" width="90"><template #default="{ row }"><ElButton text type="primary" :loading="entitySavingId === row.id" @click="saveEntity(row)">保存</ElButton></template></ElTableColumn>
+    </ElTable>
+    <div class="entity-add-row"><ElInput v-model="newEntity.name" placeholder="新增主体名称" /><ElInput v-model="newEntity.tax_number" placeholder="新增主体税号" /><ElCheckbox v-model="newEntity.is_default">默认</ElCheckbox><ElButton type="primary" plain :icon="Plus" @click="addEntity">添加主体</ElButton></div>
     <template #footer><ElButton @click="configVisible = false">取消</ElButton><ElButton type="primary" :loading="configSaving" @click="saveConfig">保存设置</ElButton></template>
   </ElDialog>
 </template>
 
 <style scoped>
-.page-actions,.toolbar,.filters,.quick-actions,.section-heading,.drawer-title,.drawer-footer,.detail-footer,.block-title,.config-row{display:flex;align-items:center}.page-actions,.filters,.quick-actions{gap:10px}.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:18px}.summary-grid article{display:flex;align-items:center;gap:15px;padding:20px}.summary-grid span,.summary-grid small{display:block;color:#7d899c;font-size:12px}.summary-grid strong{display:block;margin:6px 0 4px;color:#1b2942;font-size:25px}.summary-grid .money{font-size:20px}.summary-icon{display:grid;width:44px;height:44px;flex:0 0 auto;place-items:center;border-radius:13px}.summary-icon svg{width:20px}.summary-icon.amber{color:#cb7a16;background:#fff4df}.summary-icon.purple{color:#7656d8;background:#f1edff}.summary-icon.green{color:#149467;background:#e6f8f0}.summary-icon.blue{color:#2f6feb;background:#eaf1ff}.table-card{padding:18px}.toolbar{justify-content:space-between;gap:15px;margin-bottom:17px}.filters .el-input{width:245px}.filters .el-select{width:120px}.filters :deep(.el-date-editor){width:250px}.table-money{color:#243653}.drawer-title{width:100%;justify-content:space-between;padding-right:24px}.drawer-title h2{margin:0;color:#17243c;font-size:21px}.drawer-title p{margin:5px 0 0;color:#8390a4;font-size:12px}.editor-content{display:flex;flex-direction:column;gap:16px}.editor-section{padding:21px 23px;border:1px solid #e6ebf3;border-radius:13px;background:#fff}.section-heading{justify-content:space-between;gap:18px;margin-bottom:16px}.section-heading h3,.block-title h3{margin:0;color:#22304a;font-size:15px}.section-heading p{margin:5px 0 0;color:#8995a7;font-size:12px}.basic-grid{display:grid;grid-template-columns:1fr 1fr 2fr;gap:18px}.basic-grid .el-form-item{margin-bottom:0}.basic-grid :deep(.el-select){width:100%}.quick-heading{align-items:flex-start}.entry-table :deep(.el-table__cell){padding:6px 0}.entry-table :deep(.cell){padding:0 6px}.entry-table :deep(.el-date-editor),.entry-table :deep(.el-select),.entry-table :deep(.el-input-number){width:100%}.row-number{display:block;color:#8b97a9;text-align:center}.entry-footer{display:flex;align-items:center;justify-content:space-between;padding:13px 4px 0;color:#7f8b9d;font-size:13px}.entry-footer span{margin-left:22px}.entry-footer strong{margin-left:10px;color:#2f6feb;font-size:20px}.attachment-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.attachment-item{display:flex;align-items:center;gap:10px;min-width:0;padding:10px;border:1px solid #e4eaf2;border-radius:10px;color:inherit;text-decoration:none}.attachment-item:hover{border-color:#aac7f8;background:#f8fbff}.attachment-item>div:nth-child(2){min-width:0;flex:1}.attachment-item strong,.attachment-item span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attachment-item strong{color:#34425a;font-size:12px}.attachment-item span{margin-top:3px;color:#98a3b3;font-size:11px}.file-icon{display:grid;width:32px;height:32px;flex:0 0 auto;place-items:center;border-radius:8px;color:#2f6feb;background:#edf3ff}.file-icon svg{width:15px}.drawer-footer,.detail-footer{justify-content:space-between}.detail-content{min-height:300px}.detail-hero{display:flex;align-items:flex-start;justify-content:space-between;padding:23px;border-radius:14px;color:#fff;background:linear-gradient(135deg,#163761,#225ca8)}.detail-hero span{font-size:12px;opacity:.78}.detail-hero h2{margin:8px 0 5px;font-size:30px}.detail-hero p{margin:0;font-size:13px;opacity:.82}.detail-block{margin-top:15px;padding:20px;border:1px solid #e6ebf3;border-radius:13px}.block-title{justify-content:space-between;margin-bottom:14px}.block-title span{color:#78869b;font-size:12px}.detail-note{margin-top:12px;padding:10px 12px;border-radius:8px;color:#5e6b7e;background:#f6f8fb;font-size:12px}.detail-note span{margin-right:12px;color:#8b97a8}.detail-files{display:flex;flex-wrap:wrap;gap:8px}.detail-files a{display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid #e2e8f1;border-radius:8px;color:#2f6feb;font-size:12px;text-decoration:none}.detail-files svg{width:14px}.approval-timeline{padding-top:4px}.approval-timeline strong{color:#34425a;font-size:13px}.approval-timeline p{margin:4px 0 0;color:#8290a4;font-size:12px}.paste-tip{display:flex;gap:12px;margin-bottom:14px;padding:13px;border-radius:10px;color:#506078;background:#f3f7fd}.paste-tip svg{width:23px;color:#2f6feb}.paste-tip strong{font-size:13px}.paste-tip p{margin:4px 0 0;font-size:12px}.flow-preview{display:flex;align-items:center;justify-content:center;margin-bottom:24px;padding:18px;border-radius:11px;background:#f5f8fc}.flow-preview div{display:flex;align-items:center;gap:6px}.flow-preview div span{display:grid;width:24px;height:24px;place-items:center;border-radius:50%;color:#fff;background:#2f6feb;font-size:11px}.flow-preview div strong{font-size:12px;white-space:nowrap}.flow-preview i{width:25px;height:1px;margin:0 7px;background:#cbd5e4}.flow-preview .disabled{opacity:.38}.config-row{justify-content:space-between;margin-bottom:18px;padding:16px;border:1px solid #e5eaf2;border-radius:10px}.config-row strong{color:#2d3a51;font-size:14px}.config-row p{max-width:400px;margin:6px 0 0;color:#8793a5;font-size:12px;line-height:1.6}@media(max-width:1200px){.summary-grid{grid-template-columns:repeat(2,1fr)}.toolbar{align-items:flex-start;flex-direction:column}.filters{width:100%;flex-wrap:wrap}.attachment-list{grid-template-columns:repeat(2,1fr)}}@media(max-width:760px){.summary-grid{grid-template-columns:1fr}.page-actions,.filters,.quick-actions{flex-wrap:wrap}.basic-grid{grid-template-columns:1fr}.attachment-list{grid-template-columns:1fr}.section-heading{align-items:flex-start;flex-direction:column}.flow-preview{overflow-x:auto;justify-content:flex-start}}
-.batch-guide{display:flex;align-items:center;justify-content:center;margin-bottom:18px;padding:15px 18px;border-radius:11px;background:#f5f8fc}.batch-guide>div{display:grid;grid-template-columns:28px auto;gap:1px 8px;align-items:center}.batch-guide>div span{grid-row:1/3;display:grid;width:28px;height:28px;place-items:center;border-radius:50%;color:#fff;background:#2f6feb;font-size:12px}.batch-guide strong{color:#33425a;font-size:13px}.batch-guide small{color:#8a96a8;font-size:11px}.batch-guide i{width:42px;height:1px;margin:0 18px;background:#cbd5e4}.batch-upload :deep(.el-upload-dragger){padding:24px}.batch-file-line,.batch-file-line>div,.batch-submit-option,.batch-footer{display:flex;align-items:center}.batch-file-line{justify-content:space-between;margin-top:13px;padding:11px 14px;border:1px solid #e5eaf2;border-radius:9px;background:#fbfcfe}.batch-file-line>div{gap:8px;min-width:0}.batch-file-line svg{width:16px;color:#2f6feb}.batch-file-line strong{overflow:hidden;color:#35445c;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.batch-file-line>span{color:#7c899d;font-size:12px}.batch-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}.batch-summary>div{padding:13px 15px;border:1px solid #e4eaf2;border-radius:9px;background:#f8fafd}.batch-summary span{display:block;color:#8793a5;font-size:11px}.batch-summary strong{display:block;margin-top:5px;color:#263650;font-size:18px}.batch-errors{margin-top:14px}.batch-errors :deep(.el-alert__content){width:100%}.batch-errors :deep(.el-alert__description){line-height:1.65}.batch-preview-table{margin-top:14px}.batch-submit-option{justify-content:space-between;margin-top:14px;padding:12px 14px;border-radius:9px;background:#f4f7fb}.batch-submit-option span{color:#8491a4;font-size:12px}.batch-footer{justify-content:space-between}.batch-footer>div{display:flex;gap:9px}@media(max-width:760px){.batch-guide{align-items:flex-start;flex-direction:column;gap:10px}.batch-guide i{display:none}.batch-summary{grid-template-columns:1fr}.batch-submit-option{align-items:flex-start;flex-direction:column;gap:8px}.batch-footer{align-items:stretch;flex-direction:column;gap:10px}.batch-footer>div{justify-content:flex-end}}
+.page-actions,.toolbar,.filters,.quick-actions,.section-heading,.drawer-title,.drawer-footer,.detail-footer,.block-title,.config-row{display:flex;align-items:center}.page-actions,.filters,.quick-actions{gap:10px}.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:18px}.summary-grid article{display:flex;align-items:center;gap:15px;padding:20px}.summary-grid span,.summary-grid small{display:block;color:#7d899c;font-size:12px}.summary-grid strong{display:block;margin:6px 0 4px;color:#1b2942;font-size:25px}.summary-grid .money{font-size:20px}.summary-icon{display:grid;width:44px;height:44px;flex:0 0 auto;place-items:center;border-radius:13px}.summary-icon svg{width:20px}.summary-icon.amber{color:#cb7a16;background:#fff4df}.summary-icon.purple{color:#7656d8;background:#f1edff}.summary-icon.green{color:#149467;background:#e6f8f0}.summary-icon.blue{color:#2f6feb;background:#eaf1ff}.table-card{padding:18px}.toolbar{justify-content:space-between;gap:15px;margin-bottom:17px}.filters .el-input{width:245px}.filters .el-select{width:120px}.filters :deep(.el-date-editor){width:250px}.table-money{color:#243653}.drawer-title{width:100%;justify-content:space-between;padding-right:24px}.drawer-title h2{margin:0;color:#17243c;font-size:21px}.drawer-title p{margin:5px 0 0;color:#8390a4;font-size:12px}.editor-content{display:flex;flex-direction:column;gap:16px}.editor-section{padding:21px 23px;border:1px solid #e6ebf3;border-radius:13px;background:#fff}.section-heading{justify-content:space-between;gap:18px;margin-bottom:16px}.section-heading h3,.block-title h3{margin:0;color:#22304a;font-size:15px}.section-heading p{margin:5px 0 0;color:#8995a7;font-size:12px}.basic-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px}.basic-grid .span-2{grid-column:span 2}.basic-grid .el-form-item{margin-bottom:0}.basic-grid :deep(.el-select),.basic-grid :deep(.el-input){width:100%}.entity-option-tax{float:right;margin-left:16px;color:#9aa5b5}.quick-heading{align-items:flex-start}.entry-table :deep(.el-table__cell){padding:6px 0}.entry-table :deep(.cell){padding:0 6px}.entry-table :deep(.el-date-editor),.entry-table :deep(.el-select),.entry-table :deep(.el-input-number){width:100%}.row-number{display:block;color:#8b97a9;text-align:center}.entry-footer{display:flex;align-items:center;justify-content:space-between;padding:13px 4px 0;color:#7f8b9d;font-size:13px}.entry-footer span{margin-left:22px}.entry-footer strong{margin-left:10px;color:#2f6feb;font-size:20px}.attachment-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.attachment-item{display:flex;align-items:center;gap:10px;min-width:0;padding:10px;border:1px solid #e4eaf2;border-radius:10px;color:inherit;text-decoration:none}.attachment-item:hover{border-color:#aac7f8;background:#f8fbff}.attachment-item>div:nth-child(2){min-width:0;flex:1}.attachment-item strong,.attachment-item span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attachment-item strong{color:#34425a;font-size:12px}.attachment-item span{margin-top:3px;color:#98a3b3;font-size:11px}.file-icon{display:grid;width:32px;height:32px;flex:0 0 auto;place-items:center;border-radius:8px;color:#2f6feb;background:#edf3ff}.file-icon svg{width:15px}.drawer-footer,.detail-footer{justify-content:space-between}.detail-content{min-height:300px}.detail-hero{display:flex;align-items:flex-start;justify-content:space-between;padding:23px;border-radius:14px;color:#fff;background:linear-gradient(135deg,#163761,#225ca8)}.detail-hero span{font-size:12px;opacity:.78}.detail-hero h2{margin:8px 0 5px;font-size:30px}.detail-hero p{margin:0;font-size:13px;opacity:.82}.detail-hero small{display:block;margin-top:8px;font-size:11px;opacity:.72}.detail-block{margin-top:15px;padding:20px;border:1px solid #e6ebf3;border-radius:13px}.block-title{justify-content:space-between;margin-bottom:14px}.block-title span{color:#78869b;font-size:12px}.detail-note{margin-top:12px;padding:10px 12px;border-radius:8px;color:#5e6b7e;background:#f6f8fb;font-size:12px}.detail-note span{margin-right:12px;color:#8b97a8}.detail-files{display:flex;flex-wrap:wrap;gap:8px}.detail-files a{display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid #e2e8f1;border-radius:8px;color:#2f6feb;font-size:12px;text-decoration:none}.detail-files svg{width:14px}.approval-timeline{padding-top:4px}.approval-timeline strong{color:#34425a;font-size:13px}.approval-timeline p{margin:4px 0 0;color:#8290a4;font-size:12px}.paste-tip{display:flex;gap:12px;margin-bottom:14px;padding:13px;border-radius:10px;color:#506078;background:#f3f7fd}.paste-tip svg{width:23px;color:#2f6feb}.paste-tip strong{font-size:13px}.paste-tip p{margin:4px 0 0;font-size:12px}.flow-preview{display:flex;align-items:center;justify-content:center;margin-bottom:24px;padding:18px;border-radius:11px;background:#f5f8fc}.flow-preview div{display:flex;align-items:center;gap:6px}.flow-preview div span{display:grid;width:24px;height:24px;place-items:center;border-radius:50%;color:#fff;background:#2f6feb;font-size:11px}.flow-preview div strong{font-size:12px;white-space:nowrap}.flow-preview i{width:25px;height:1px;margin:0 7px;background:#cbd5e4}.flow-preview .disabled{opacity:.38}.config-row{justify-content:space-between;margin-bottom:18px;padding:16px;border:1px solid #e5eaf2;border-radius:10px}.config-row strong{color:#2d3a51;font-size:14px}.config-row p{max-width:400px;margin:6px 0 0;color:#8793a5;font-size:12px;line-height:1.6}.invoice-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}.invoice-summary>div{padding:12px 14px;border-radius:9px;background:#f4f7fb}.invoice-summary span{display:block;color:#8793a5;font-size:11px}.invoice-summary strong{display:block;margin-top:5px;color:#253550;font-size:17px}.invoice-summary .mismatch{background:#fff5e6}.invoice-summary .mismatch strong{color:#c47716}.invoice-list{display:flex;flex-direction:column;gap:12px}.invoice-card{padding:15px;border:1px solid #e2e8f1;border-radius:11px;background:#fbfcfe}.invoice-card-head,.invoice-card-head>div,.invoice-card-foot,.invoice-card-foot>div:last-child{display:flex;align-items:center}.invoice-card-head,.invoice-card-foot{justify-content:space-between;gap:14px}.invoice-card-head>div{gap:8px}.invoice-card-head a{display:flex;align-items:center;gap:6px;color:#2f6feb;font-size:13px;text-decoration:none}.invoice-card-head span{color:#929dad;font-size:11px}.invoice-fields{display:grid;grid-template-columns:2fr 1.4fr 1fr;gap:12px;margin-top:14px}.invoice-fields .el-form-item{margin-bottom:0}.invoice-fields :deep(.el-input-number){width:100%}.invoice-card-foot{margin-top:12px}.invoice-card-foot>div:first-child{min-width:0}.invoice-card-foot span,.invoice-card-foot small{display:block;color:#7f8da1;font-size:11px}.invoice-card-foot small{margin-top:4px;color:#b07b31}.invoice-card-foot>div:last-child{gap:7px;flex:0 0 auto}.detail-invoices{display:flex;flex-direction:column;gap:8px;margin-top:12px}.detail-invoices>div{display:grid;grid-template-columns:1.5fr 2fr auto auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid #e6ebf2;border-radius:8px}.detail-invoices a{display:flex;align-items:center;gap:5px;color:#2f6feb;font-size:12px;text-decoration:none}.detail-invoices p{margin:0;color:#708096;font-size:11px}.detail-invoices strong{font-size:13px}.entity-config-head{display:flex;align-items:center;justify-content:space-between;margin:23px 0 12px}.entity-config-head strong{color:#2d3a51;font-size:14px}.entity-config-head p{margin:5px 0 0;color:#8793a5;font-size:12px}.entity-table :deep(.el-input__wrapper){box-shadow:none;background:transparent}.entity-add-row{display:grid;grid-template-columns:1.4fr 1.2fr auto auto;gap:10px;align-items:center;margin-top:10px}.entity-add-row .el-button{margin:0}@media(max-width:1200px){.summary-grid{grid-template-columns:repeat(2,1fr)}.toolbar{align-items:flex-start;flex-direction:column}.filters{width:100%;flex-wrap:wrap}.attachment-list{grid-template-columns:repeat(2,1fr)}.basic-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:760px){.summary-grid{grid-template-columns:1fr}.page-actions,.filters,.quick-actions{flex-wrap:wrap}.basic-grid,.invoice-fields,.entity-add-row{grid-template-columns:1fr}.basic-grid .span-2{grid-column:span 1}.attachment-list{grid-template-columns:1fr}.section-heading{align-items:flex-start;flex-direction:column}.flow-preview{overflow-x:auto;justify-content:flex-start}.invoice-card-head,.invoice-card-foot{align-items:flex-start;flex-direction:column}.detail-invoices>div{grid-template-columns:1fr}}
+.invoice-drop-upload{display:block;margin-bottom:14px}.invoice-drop-upload :deep(.el-upload){display:block}.invoice-drop-upload :deep(.el-upload-dragger){display:flex;align-items:center;justify-content:center;gap:15px;width:100%;padding:22px;border:1px dashed #9fbcec;border-radius:11px;background:linear-gradient(135deg,#f8fbff,#f2f7ff)}.invoice-drop-upload :deep(.el-upload-dragger:hover){border-color:#2f6feb;background:#eef5ff}.invoice-upload-icon{width:40px;height:40px;flex:0 0 auto;border-radius:11px;color:#2f6feb;background:#e2edff;font-size:21px}.invoice-upload-copy{text-align:left}.invoice-upload-copy strong,.invoice-upload-copy span{display:block}.invoice-upload-copy strong{color:#253550;font-size:14px}.invoice-upload-copy span{margin-top:5px;color:#7f8da1;font-size:12px}.invoice-upload-tip{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#8b97a8;font-size:11px}.invoice-upload-tip strong{color:#2f6feb;font-weight:500}
+.batch-guide{display:flex;align-items:center;justify-content:center;margin-bottom:18px;padding:15px 18px;border-radius:11px;background:#f5f8fc}.batch-guide>div{display:grid;grid-template-columns:28px auto;gap:1px 8px;align-items:center}.batch-guide>div span{grid-row:1/3;display:grid;width:28px;height:28px;place-items:center;border-radius:50%;color:#fff;background:#2f6feb;font-size:12px}.batch-guide strong{color:#33425a;font-size:13px}.batch-guide small{color:#8a96a8;font-size:11px}.batch-guide i{width:42px;height:1px;margin:0 18px;background:#cbd5e4}.batch-upload :deep(.el-upload-dragger){padding:24px}.batch-file-line,.batch-file-line>div,.batch-submit-option,.batch-footer{display:flex;align-items:center}.batch-file-line{justify-content:space-between;margin-top:13px;padding:11px 14px;border:1px solid #e5eaf2;border-radius:9px;background:#fbfcfe}.batch-file-line>div{gap:8px;min-width:0}.batch-file-line svg{width:16px;color:#2f6feb}.batch-file-line strong{overflow:hidden;color:#35445c;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.batch-file-line>span{color:#7c899d;font-size:12px}.batch-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}.batch-summary>div{padding:13px 15px;border:1px solid #e4eaf2;border-radius:9px;background:#f8fafd}.batch-summary span{display:block;color:#8793a5;font-size:11px}.batch-summary strong{display:block;margin-top:5px;color:#263650;font-size:18px}.batch-errors{margin-top:14px}.batch-errors :deep(.el-alert__content){width:100%}.batch-errors :deep(.el-alert__description){line-height:1.65}.batch-preview-table{margin-top:14px}.batch-submit-option{justify-content:space-between;margin-top:14px;padding:12px 14px;border-radius:9px;background:#f4f7fb}.batch-submit-option span{color:#8491a4;font-size:12px}.batch-footer{justify-content:space-between}.batch-footer>div{display:flex;gap:9px}@media(max-width:760px){.batch-guide{align-items:flex-start;flex-direction:column;gap:10px}.batch-guide i{display:none}.batch-summary{grid-template-columns:1fr}.batch-submit-option{align-items:flex-start;flex-direction:column;gap:8px}.batch-footer{align-items:stretch;flex-direction:column;gap:10px}.batch-footer>div{justify-content:flex-end}.invoice-upload-tip{align-items:flex-start;flex-direction:column}.invoice-drop-upload :deep(.el-upload-dragger){align-items:flex-start;flex-direction:column}}
 </style>

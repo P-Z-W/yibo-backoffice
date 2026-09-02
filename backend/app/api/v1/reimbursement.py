@@ -30,14 +30,23 @@ from app.models.reimbursement import (
     Reimbursement,
     ReimbursementApproval,
     ReimbursementAttachment,
+    ReimbursementEntity,
+    ReimbursementInvoice,
     ReimbursementItem,
 )
 from app.models.user import User
 from app.schemas.reimbursement import (
     ReimbursementActionInput,
     ReimbursementConfigInput,
+    ReimbursementEntityInput,
     ReimbursementExportInput,
     ReimbursementInput,
+    ReimbursementInvoiceInput,
+)
+from app.services.invoice_ocr import (
+    InvoiceOcrError,
+    InvoiceOcrNotConfiguredError,
+    recognize_invoice,
 )
 
 router = APIRouter(prefix="/reimbursements", tags=["报销"])
@@ -78,10 +87,40 @@ def finance_approval_enabled(db: Session) -> bool:
     return bool(setting and setting.value.strip().lower() in {"1", "true", "yes"})
 
 
+def serialize_entity(entity: ReimbursementEntity) -> dict[str, object]:
+    return {
+        "id": entity.id,
+        "name": entity.name,
+        "tax_number": entity.tax_number,
+        "is_default": entity.is_default,
+        "is_active": entity.is_active,
+    }
+
+
+def active_entities(db: Session) -> list[dict[str, object]]:
+    entities = db.scalars(
+        select(ReimbursementEntity)
+        .where(ReimbursementEntity.is_active.is_(True))
+        .order_by(ReimbursementEntity.is_default.desc(), ReimbursementEntity.name)
+    ).all()
+    return [serialize_entity(entity) for entity in entities]
+
+
+def reimbursement_config_payload(db: Session) -> dict[str, object]:
+    return {
+        "finance_approval_enabled": finance_approval_enabled(db),
+        "teams": TEAMS,
+        "expense_categories": EXPENSE_CATEGORIES,
+        "entities": active_entities(db),
+        "invoice_ocr_available": settings.invoice_ocr_available,
+        "invoice_ocr_provider": settings.invoice_ocr_provider,
+    }
+
+
 def visible_statement(db: Session, user: User):
     statement = select(Reimbursement).options(
         selectinload(Reimbursement.items),
-        selectinload(Reimbursement.attachments),
+        selectinload(Reimbursement.attachments).selectinload(ReimbursementAttachment.invoice),
         selectinload(Reimbursement.approval_records),
     )
     scope = get_permission_scope(db, user, "reimbursement.view")
@@ -145,6 +184,44 @@ def invalidate_export(claim: Reimbursement) -> None:
     claim.export_batch = None
 
 
+def serialize_invoice(invoice: ReimbursementInvoice) -> dict[str, object]:
+    return {
+        "id": invoice.id,
+        "recognition_status": invoice.recognition_status,
+        "recognition_provider": invoice.recognition_provider,
+        "recognition_message": invoice.recognition_message or "",
+        "recognized_entity_name": invoice.recognized_entity_name or "",
+        "recognized_tax_number": invoice.recognized_tax_number or "",
+        "recognized_amount": (
+            float(invoice.recognized_amount) if invoice.recognized_amount is not None else None
+        ),
+        "entity_name": invoice.final_entity_name or "",
+        "tax_number": invoice.final_tax_number or "",
+        "amount": float(invoice.final_amount) if invoice.final_amount is not None else None,
+        "invoice_code": invoice.invoice_code or "",
+        "invoice_number": invoice.invoice_number or "",
+        "invoice_date": invoice.invoice_date.isoformat() if invoice.invoice_date else "",
+        "manually_edited": invoice.manually_edited,
+        "recognized_at": invoice.recognized_at.isoformat() if invoice.recognized_at else "",
+    }
+
+
+def serialize_attachment(
+    attachment: ReimbursementAttachment, *, duplicate: bool = False
+) -> dict[str, object]:
+    return {
+        "id": attachment.id,
+        "original_name": attachment.original_name,
+        "content_type": attachment.content_type,
+        "size_bytes": attachment.size_bytes,
+        "document_type": attachment.document_type,
+        "url": f"{settings.api_prefix}/reimbursements/attachments/{attachment.id}",
+        "created_at": attachment.created_at.isoformat() if attachment.created_at else "",
+        "duplicate": duplicate,
+        "invoice": serialize_invoice(attachment.invoice) if attachment.invoice else None,
+    }
+
+
 def serialize_claim(
     db: Session, claim: Reimbursement, user: User, *, detail: bool = False
 ) -> dict[str, object]:
@@ -167,18 +244,43 @@ def serialize_claim(
     if len(categories) > 2:
         summary += "等"
     summary += f" {len(items)} 项"
+    invoices = [item.invoice for item in claim.attachments if item.invoice is not None]
+    invoice_amount = sum(
+        (invoice.final_amount for invoice in invoices if invoice.final_amount is not None),
+        start=Decimal("0"),
+    )
+    invoice_issues = sum(
+        invoice.recognition_status in {"failed", "unconfigured", "needs_review"}
+        or bool(
+            invoice.final_entity_name
+            and claim.entity_name
+            and invoice.final_entity_name != claim.entity_name
+        )
+        or bool(
+            invoice.final_tax_number
+            and claim.tax_number
+            and invoice.final_tax_number != claim.tax_number
+        )
+        for invoice in invoices
+    )
     payload: dict[str, object] = {
         "id": claim.id,
         "number": claim.number,
         "applicant_id": claim.applicant_id,
         "applicant_name": claim.applicant_name,
         "team": claim.team,
+        "entity_name": claim.entity_name,
+        "tax_number": claim.tax_number,
         "status": claim.status,
         "status_label": display_status(claim),
         "total_amount": float(claim.total_amount),
         "item_count": len(items),
         "item_summary": summary,
         "attachment_count": len(claim.attachments),
+        "invoice_count": len(invoices),
+        "invoice_amount": float(invoice_amount),
+        "invoice_amount_difference": float(claim.total_amount - invoice_amount),
+        "invoice_issue_count": invoice_issues,
         "note": claim.note or "",
         "finance_approval_required": claim.finance_approval_required,
         "exported": claim.exported,
@@ -192,17 +294,7 @@ def serialize_claim(
     }
     if detail:
         payload["items"] = items
-        payload["attachments"] = [
-            {
-                "id": item.id,
-                "original_name": item.original_name,
-                "content_type": item.content_type,
-                "size_bytes": item.size_bytes,
-                "url": f"{settings.api_prefix}/reimbursements/attachments/{item.id}",
-                "created_at": item.created_at.isoformat() if item.created_at else "",
-            }
-            for item in claim.attachments
-        ]
+        payload["attachments"] = [serialize_attachment(item) for item in claim.attachments]
         payload["approval_records"] = [
             {
                 "id": record.id,
@@ -222,6 +314,8 @@ def serialize_claim(
 def replace_items(claim: Reimbursement, payload: ReimbursementInput) -> None:
     claim.applicant_name = payload.applicant_name
     claim.team = payload.team
+    claim.entity_name = payload.entity_name
+    claim.tax_number = payload.tax_number
     claim.note = payload.note or None
     claim.items.clear()
     total = Decimal("0")
@@ -241,6 +335,10 @@ def replace_items(claim: Reimbursement, payload: ReimbursementInput) -> None:
 
 
 def validate_for_submit(claim: Reimbursement) -> None:
+    if not claim.entity_name:
+        raise HTTPException(status_code=422, detail="请选择或填写报销主体")
+    if not claim.tax_number:
+        raise HTTPException(status_code=422, detail="请填写报销主体税号")
     if not claim.items:
         raise HTTPException(status_code=422, detail="至少填写一条费用明细")
     invalid = [index + 1 for index, item in enumerate(claim.items) if item.amount <= 0]
@@ -317,6 +415,12 @@ def parse_batch_workbook(
         "申请人": "applicant_name",
         "所属组": "team",
         "组别": "team",
+        "主体": "entity_name",
+        "报销主体": "entity_name",
+        "购买方名称": "entity_name",
+        "税号": "tax_number",
+        "纳税人识别号": "tax_number",
+        "购买方税号": "tax_number",
         "费用日期": "expense_date",
         "日期": "expense_date",
         "费用类别": "category",
@@ -329,7 +433,16 @@ def parse_batch_workbook(
         "整单备注": "note",
         "报销备注": "note",
     }
-    required = {"group_key", "applicant_name", "team", "expense_date", "category", "amount"}
+    required = {
+        "group_key",
+        "applicant_name",
+        "team",
+        "entity_name",
+        "tax_number",
+        "expense_date",
+        "category",
+        "amount",
+    }
     mapping: dict[int, str] = {}
     header_row = 0
     for row_number, values in enumerate(rows, start=1):
@@ -367,6 +480,8 @@ def parse_batch_workbook(
             group_key = str(raw.get("group_key") or "").strip()
             applicant_name = str(raw.get("applicant_name") or "").strip()
             team = str(raw.get("team") or "").strip()
+            entity_name = str(raw.get("entity_name") or "").strip()
+            tax_number = "".join(str(raw.get("tax_number") or "").upper().split())
             category = str(raw.get("category") or "").strip()
             note = str(raw.get("note") or "").strip()
             if not group_key:
@@ -379,6 +494,10 @@ def parse_batch_workbook(
                 raise ValueError("报销人不能超过 80 个字")
             if team not in TEAMS:
                 raise ValueError("所属组只能填写发货组或退货组")
+            if not entity_name:
+                raise ValueError("主体不能为空")
+            if not tax_number:
+                raise ValueError("税号不能为空")
             if not category:
                 raise ValueError("费用类别不能为空")
             if len(category) > 60:
@@ -418,16 +537,23 @@ def parse_batch_workbook(
                 "group_key": group_key,
                 "applicant_name": applicant_name,
                 "team": team,
+                "entity_name": entity_name,
+                "tax_number": tax_number,
                 "note": note,
                 "items": [],
                 "source_rows": [],
             }
             grouped[group_key] = group
-        elif group["applicant_name"] != applicant_name or group["team"] != team:
+        elif (
+            group["applicant_name"] != applicant_name
+            or group["team"] != team
+            or group["entity_name"] != entity_name
+            or group["tax_number"] != tax_number
+        ):
             errors.append(
                 {
                     "row": excel_row,
-                    "message": f"分组 {group_key} 的报销人和所属组必须保持一致",
+                    "message": f"分组 {group_key} 的报销人、所属组、主体和税号必须保持一致",
                 }
             )
             continue
@@ -490,6 +616,8 @@ def batch_preview_payload(groups: list[dict[str, object]]) -> list[dict[str, obj
                 "group_key": group["group_key"],
                 "applicant_name": group["applicant_name"],
                 "team": group["team"],
+                "entity_name": group["entity_name"],
+                "tax_number": group["tax_number"],
                 "note": group["note"],
                 "item_count": len(items),
                 "total_amount": float(sum((item["amount"] for item in items), start=Decimal("0"))),
@@ -546,6 +674,8 @@ def list_reimbursements(
             or_(
                 Reimbursement.number.like(like),
                 Reimbursement.applicant_name.like(like),
+                Reimbursement.entity_name.like(like),
+                Reimbursement.tax_number.like(like),
                 Reimbursement.items.any(ReimbursementItem.related_number.like(like)),
             )
         )
@@ -576,11 +706,7 @@ def list_reimbursements(
     return {
         "records": [serialize_claim(db, row, user) for row in rows],
         "summary": summary,
-        "config": {
-            "finance_approval_enabled": finance_approval_enabled(db),
-            "teams": TEAMS,
-            "expense_categories": EXPENSE_CATEGORIES,
-        },
+        "config": reimbursement_config_payload(db),
         "permissions": {
             "can_configure": bool(get_permission_scope(db, user, "reimbursement.configure")),
             "can_export": bool(get_permission_scope(db, user, "reimbursement.export")),
@@ -593,11 +719,7 @@ def get_config(
     db: Session = Depends(get_db),
     _: User = Depends(require_permission("reimbursement.view")),
 ) -> dict[str, object]:
-    return {
-        "finance_approval_enabled": finance_approval_enabled(db),
-        "teams": TEAMS,
-        "expense_categories": EXPENSE_CATEGORIES,
-    }
+    return reimbursement_config_payload(db)
 
 
 @router.put("/config")
@@ -618,6 +740,71 @@ def save_config(
         setting.value = "true" if payload.finance_approval_enabled else "false"
     db.commit()
     return {"finance_approval_enabled": payload.finance_approval_enabled}
+
+
+@router.get("/entities")
+def list_entities(
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("reimbursement.view")),
+) -> list[dict[str, object]]:
+    statement = select(ReimbursementEntity)
+    if not include_inactive:
+        statement = statement.where(ReimbursementEntity.is_active.is_(True))
+    entities = db.scalars(
+        statement.order_by(ReimbursementEntity.is_default.desc(), ReimbursementEntity.name)
+    ).all()
+    return [serialize_entity(entity) for entity in entities]
+
+
+def save_entity_record(
+    db: Session,
+    payload: ReimbursementEntityInput,
+    entity: ReimbursementEntity | None = None,
+) -> ReimbursementEntity:
+    duplicate = db.scalar(
+        select(ReimbursementEntity).where(
+            ReimbursementEntity.name == payload.name,
+            ReimbursementEntity.id != (entity.id if entity else 0),
+        )
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="该报销主体已经存在")
+    if payload.is_default:
+        for current in db.scalars(select(ReimbursementEntity)).all():
+            current.is_default = False
+    if entity is None:
+        entity = ReimbursementEntity()
+        db.add(entity)
+    entity.name = payload.name
+    entity.tax_number = payload.tax_number
+    entity.is_default = payload.is_default
+    entity.is_active = payload.is_active
+    db.commit()
+    db.refresh(entity)
+    return entity
+
+
+@router.post("/entities", status_code=status.HTTP_201_CREATED)
+def create_entity(
+    payload: ReimbursementEntityInput,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("reimbursement.configure")),
+) -> dict[str, object]:
+    return serialize_entity(save_entity_record(db, payload))
+
+
+@router.put("/entities/{entity_id}")
+def update_entity(
+    entity_id: int,
+    payload: ReimbursementEntityInput,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("reimbursement.configure")),
+) -> dict[str, object]:
+    entity = db.get(ReimbursementEntity, entity_id)
+    if entity is None:
+        raise HTTPException(status_code=404, detail="报销主体不存在")
+    return serialize_entity(save_entity_record(db, payload, entity))
 
 
 @router.get("/batch/template/xlsx")
@@ -695,6 +882,8 @@ def import_batch_reimbursements(
                 applicant_id=int(group["applicant_id"]),
                 applicant_name=str(group["applicant_name"]),
                 team=str(group["team"]),
+                entity_name=str(group["entity_name"]),
+                tax_number=str(group["tax_number"]),
                 status="pending_supervisor" if submit else "draft",
                 note=str(group["note"]) or None,
                 total_amount=sum((item["amount"] for item in items), start=Decimal("0")).quantize(
@@ -862,6 +1051,8 @@ def export_reimbursements(
         "报销单号",
         "报销人",
         "所属组",
+        "主体",
+        "税号",
         "状态代码",
         "单据状态",
         "费用日期",
@@ -877,6 +1068,10 @@ def export_reimbursements(
         "凭证数",
         "提交时间",
         "创建时间",
+        "发票张数",
+        "发票识别金额",
+        "发票金额差异",
+        "发票识别问题数",
     ]
     sheet.append(headers)
     supervisor_names: dict[int, str] = {}
@@ -895,6 +1090,8 @@ def export_reimbursements(
                     claim.number,
                     claim.applicant_name,
                     claim.team,
+                    claim.entity_name,
+                    claim.tax_number,
                     claim.status,
                     display_status(claim),
                     item.expense_date,
@@ -910,6 +1107,36 @@ def export_reimbursements(
                     len(claim.attachments),
                     claim.submitted_at,
                     claim.created_at,
+                    sum(item.invoice is not None for item in claim.attachments),
+                    float(
+                        sum(
+                            (
+                                item.invoice.final_amount
+                                for item in claim.attachments
+                                if item.invoice and item.invoice.final_amount is not None
+                            ),
+                            start=Decimal("0"),
+                        )
+                    ),
+                    float(
+                        claim.total_amount
+                        - sum(
+                            (
+                                item.invoice.final_amount
+                                for item in claim.attachments
+                                if item.invoice and item.invoice.final_amount is not None
+                            ),
+                            start=Decimal("0"),
+                        )
+                    ),
+                    sum(
+                        bool(
+                            item.invoice
+                            and item.invoice.recognition_status
+                            in {"failed", "unconfigured", "needs_review"}
+                        )
+                        for item in claim.attachments
+                    ),
                 ]
             )
     header_fill = PatternFill("solid", fgColor="183B69")
@@ -928,6 +1155,8 @@ def export_reimbursements(
         20,
         12,
         12,
+        30,
+        24,
         20,
         14,
         13,
@@ -943,14 +1172,20 @@ def export_reimbursements(
         10,
         20,
         20,
+        12,
+        16,
+        16,
+        14,
     )
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
     for row in range(2, sheet.max_row + 1):
-        sheet.cell(row, 8).number_format = "yyyy-mm-dd"
-        sheet.cell(row, 10).number_format = "¥#,##0.00"
-        for column in (15, 17, 19, 20):
+        sheet.cell(row, 10).number_format = "yyyy-mm-dd"
+        sheet.cell(row, 12).number_format = "¥#,##0.00"
+        for column in (17, 19, 21, 22):
             sheet.cell(row, column).number_format = "yyyy-mm-dd hh:mm"
+        for column in (24, 25):
+            sheet.cell(row, column).number_format = "¥#,##0.00"
     summary = workbook.create_sheet("导出汇总")
     summary.append(["报销单数", len(claims)])
     summary.append(["明细条数", sum(len(claim.items) for claim in claims)])
@@ -1147,10 +1382,70 @@ def return_reimbursement(
     return serialize_claim(db, get_visible_claim(db, claim.id, user), user, detail=True)
 
 
+def recognize_attachment_invoice(
+    db: Session,
+    claim: Reimbursement,
+    attachment: ReimbursementAttachment,
+    contents: bytes,
+    suffix: str,
+) -> ReimbursementInvoice:
+    invoice = attachment.invoice or ReimbursementInvoice(attachment=attachment)
+    invoice.recognition_status = "pending"
+    invoice.recognition_provider = settings.invoice_ocr_provider
+    invoice.recognition_message = "正在识别"
+    try:
+        result = recognize_invoice(contents, suffix)
+        invoice.recognition_status = result.status
+        invoice.recognition_provider = result.provider
+        invoice.recognition_message = result.message
+        invoice.recognized_entity_name = result.entity_name or None
+        invoice.recognized_tax_number = result.tax_number or None
+        invoice.recognized_amount = result.amount
+        invoice.final_entity_name = result.entity_name or None
+        invoice.final_tax_number = result.tax_number or None
+        invoice.final_amount = result.amount
+        invoice.invoice_code = result.invoice_code or None
+        invoice.invoice_number = result.invoice_number or None
+        invoice.invoice_date = result.invoice_date.date() if result.invoice_date else None
+        invoice.provider_request_id = result.request_id or None
+        invoice.recognized_at = now()
+        invoice.manually_edited = False
+
+        if invoice.invoice_number:
+            duplicate = db.scalar(
+                select(ReimbursementInvoice.id)
+                .join(ReimbursementAttachment)
+                .where(
+                    ReimbursementInvoice.invoice_number == invoice.invoice_number,
+                    ReimbursementInvoice.id != (invoice.id or 0),
+                    ReimbursementAttachment.reimbursement_id != claim.id,
+                )
+                .limit(1)
+            )
+            if duplicate:
+                invoice.recognition_status = "needs_review"
+                invoice.recognition_message = "检测到相同发票号码，请核对是否重复报销"
+        if not claim.entity_name and invoice.final_entity_name:
+            claim.entity_name = invoice.final_entity_name
+        if not claim.tax_number and invoice.final_tax_number:
+            claim.tax_number = invoice.final_tax_number
+    except InvoiceOcrNotConfiguredError as exc:
+        invoice.recognition_status = "unconfigured"
+        invoice.recognition_message = str(exc)
+        invoice.recognized_at = now()
+    except InvoiceOcrError as exc:
+        invoice.recognition_status = "failed"
+        invoice.recognition_message = str(exc)
+        invoice.recognized_at = now()
+    db.add(invoice)
+    return invoice
+
+
 @router.post("/{claim_id}/attachments", status_code=status.HTTP_201_CREATED)
 def upload_attachment(
     claim_id: int,
     file: UploadFile = File(...),
+    document_type: str = Form(default="voucher"),
     db: Session = Depends(get_db),
     user: User = Depends(require_permission("reimbursement.create")),
 ) -> dict[str, object]:
@@ -1166,6 +1461,10 @@ def upload_attachment(
         raise HTTPException(status_code=413, detail="单个附件不能超过 10MB")
     if not contents:
         raise HTTPException(status_code=422, detail="附件内容为空")
+    if document_type not in {"invoice", "voucher"}:
+        raise HTTPException(status_code=422, detail="附件类型无效")
+    if document_type == "invoice" and suffix not in {".jpg", ".jpeg", ".png", ".webp", ".pdf"}:
+        raise HTTPException(status_code=422, detail="发票识别仅支持图片和 PDF")
     digest = sha256(contents).hexdigest()
     duplicate = db.scalar(
         select(ReimbursementAttachment).where(
@@ -1191,19 +1490,92 @@ def upload_attachment(
         content_type=file.content_type or "application/octet-stream",
         size_bytes=len(contents),
         sha256=digest,
+        document_type=document_type,
     )
     db.add(attachment)
+    db.flush()
+    attachment_id = attachment.id
+    if document_type == "invoice":
+        recognize_attachment_invoice(db, claim, attachment, contents, suffix)
     invalidate_export(claim)
     db.commit()
-    db.refresh(attachment)
-    return {
-        "id": attachment.id,
-        "original_name": attachment.original_name,
-        "content_type": attachment.content_type,
-        "size_bytes": attachment.size_bytes,
-        "url": f"{settings.api_prefix}/reimbursements/attachments/{attachment.id}",
-        "duplicate": bool(duplicate),
-    }
+    db.expire_all()
+    refreshed = get_visible_claim(db, claim.id, user)
+    uploaded = next(item for item in refreshed.attachments if item.id == attachment_id)
+    return serialize_attachment(uploaded, duplicate=bool(duplicate))
+
+
+@router.post("/{claim_id}/invoices/{invoice_id}/recognize")
+def retry_invoice_recognition(
+    claim_id: int,
+    invoice_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("reimbursement.create")),
+) -> dict[str, object]:
+    claim = get_visible_claim(db, claim_id, user)
+    if not can_edit(db, claim, user):
+        raise HTTPException(status_code=409, detail="当前状态不能重新识别发票")
+    attachment = next(
+        (item for item in claim.attachments if item.invoice and item.invoice.id == invoice_id),
+        None,
+    )
+    if attachment is None:
+        raise HTTPException(status_code=404, detail="发票不存在")
+    path = (settings.storage_path / attachment.relative_path).resolve()
+    root = settings.storage_path.resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="发票文件不存在")
+    recognize_attachment_invoice(db, claim, attachment, path.read_bytes(), path.suffix.lower())
+    invalidate_export(claim)
+    db.commit()
+    refreshed = get_visible_claim(db, claim.id, user)
+    result = next(item for item in refreshed.attachments if item.id == attachment.id)
+    return serialize_attachment(result)
+
+
+@router.put("/{claim_id}/invoices/{invoice_id}")
+def update_invoice_recognition(
+    claim_id: int,
+    invoice_id: int,
+    payload: ReimbursementInvoiceInput,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("reimbursement.create")),
+) -> dict[str, object]:
+    claim = get_visible_claim(db, claim_id, user)
+    if not can_edit(db, claim, user):
+        raise HTTPException(status_code=409, detail="当前状态不能修改发票识别结果")
+    attachment = next(
+        (item for item in claim.attachments if item.invoice and item.invoice.id == invoice_id),
+        None,
+    )
+    if attachment is None or attachment.invoice is None:
+        raise HTTPException(status_code=404, detail="发票不存在")
+    invoice = attachment.invoice
+    invoice.final_entity_name = payload.entity_name or None
+    invoice.final_tax_number = payload.tax_number or None
+    invoice.final_amount = payload.amount
+    invoice.manually_edited = bool(
+        (invoice.recognized_entity_name or "") != payload.entity_name
+        or (invoice.recognized_tax_number or "") != payload.tax_number
+        or invoice.recognized_amount != payload.amount
+    )
+    if payload.entity_name and payload.tax_number and payload.amount is not None:
+        invoice.recognition_status = "confirmed" if invoice.manually_edited else "success"
+        invoice.recognition_message = (
+            "已人工修改并确认" if invoice.manually_edited else "识别结果已确认"
+        )
+    else:
+        invoice.recognition_status = "needs_review"
+        invoice.recognition_message = "主体、税号和金额需要补充完整"
+    if not claim.entity_name and payload.entity_name:
+        claim.entity_name = payload.entity_name
+    if not claim.tax_number and payload.tax_number:
+        claim.tax_number = payload.tax_number
+    invalidate_export(claim)
+    db.commit()
+    refreshed = get_visible_claim(db, claim.id, user)
+    result = next(item for item in refreshed.attachments if item.id == attachment.id)
+    return serialize_attachment(result)
 
 
 @router.delete("/{claim_id}/attachments/{attachment_id}", status_code=status.HTTP_204_NO_CONTENT)

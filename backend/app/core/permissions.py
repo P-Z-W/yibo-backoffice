@@ -78,9 +78,13 @@ PERMISSION_DEFINITIONS: tuple[PermissionDefinition, ...] = (
         63,
         supports_scope=True,
     ),
-    permission("reimbursement.export", "导出报销审批表", "报销管理", "导出", 64),
+    permission("reimbursement.export", "导出报销数据", "报销管理", "导出", 64),
     permission("reimbursement.configure", "设置报销流程", "报销管理", "配置", 65),
     permission("storage.view", "查看仓储费", "仓储费", "查看", 70),
+    permission("suppliers.view", "查看供应商", "供应商管理", "查看", 72),
+    permission("suppliers.manage", "维护供应商", "供应商管理", "维护", 73),
+    permission("operations_data.view", "查看业务台账", "客户与运营管理", "查看", 74),
+    permission("operations_data.manage", "维护业务台账", "客户与运营管理", "维护", 75),
     permission("accounts.view", "查看账号", "账号与权限", "查看账号", 80),
     permission("accounts.manage", "管理账号", "账号与权限", "管理账号", 81),
     permission("roles.view", "查看角色权限", "账号与权限", "查看角色", 82),
@@ -121,7 +125,7 @@ BUILTIN_ROLES: tuple[dict[str, object], ...] = (
     {
         "code": "finance",
         "name": "财务人员",
-        "description": "管理员工工资、报销财务审批和财务导出。",
+        "description": "管理员工工资，在系统内完成报销财务审批和数据导出。",
         "is_system": True,
     },
     {
@@ -156,6 +160,10 @@ BUILTIN_ROLE_PERMISSIONS: dict[str, dict[str, str]] = {
         "reimbursement.create": "self",
         "reimbursement.export": "all",
         "storage.view": "all",
+        "suppliers.view": "all",
+        "suppliers.manage": "all",
+        "operations_data.view": "all",
+        "operations_data.manage": "all",
     },
     "supervisor": {
         "dashboard.view": "all",
@@ -171,6 +179,8 @@ BUILTIN_ROLE_PERMISSIONS: dict[str, dict[str, str]] = {
         "reimbursement.approve_supervisor": "team",
         "reimbursement.export": "all",
         "storage.view": "all",
+        "suppliers.view": "all",
+        "operations_data.view": "all",
     },
     "team_leader": {
         "dashboard.view": "all",
@@ -194,6 +204,8 @@ BUILTIN_ROLE_PERMISSIONS: dict[str, dict[str, str]] = {
         "reimbursement.approve_finance": "all",
         "reimbursement.export": "all",
         "storage.view": "all",
+        "suppliers.view": "all",
+        "operations_data.view": "all",
     },
     "operator": {
         "dashboard.view": "all",
@@ -209,6 +221,8 @@ BUILTIN_ROLE_PERMISSIONS: dict[str, dict[str, str]] = {
         "reimbursement.view": "self",
         "reimbursement.create": "self",
         "storage.view": "all",
+        "suppliers.view": "all",
+        "operations_data.view": "all",
     },
     "employee": {
         "dashboard.view": "all",

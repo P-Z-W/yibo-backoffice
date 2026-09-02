@@ -72,3 +72,37 @@ class MonthlyAnalyticsInput(BaseModel):
 class MonthlyAnalyticsStatusInput(BaseModel):
     month: str = Field(pattern=r"^\d{4}-\d{2}$")
     status: Literal["draft", "completed", "archived"]
+
+
+class ShippingRemarkInput(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    remark: str = Field(default="", max_length=500)
+
+
+class StaffingAnalysisInput(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    analysis: str = Field(default="", max_length=5000)
+
+
+class StaffingInputsInput(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    team_name: str | None = Field(default=None, max_length=100)
+    regular_staff: Decimal = Field(ge=0, le=1000000, decimal_places=2)
+    optimal_staff: Decimal | None = Field(default=None, ge=0, le=1000000, decimal_places=2)
+    monthly_output: Decimal | None = Field(
+        default=None, ge=0, le=1000000000, decimal_places=2
+    )
+    optimal_monthly_output: Decimal | None = Field(
+        default=None, ge=0, le=1000000000, decimal_places=2
+    )
+
+
+class ShippingExportInput(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    scope: Literal["filtered", "selected"] = "filtered"
+    row_ids: list[int] = Field(default_factory=list, max_length=5000)
+    columns: list[
+        Literal["团队名称", "发货单量", "数据发货占比", "备注"]
+    ] = Field(min_length=1, max_length=4)
+    search: str = Field(default="", max_length=100)
+    sort_order: Literal["", "asc", "desc"] = ""

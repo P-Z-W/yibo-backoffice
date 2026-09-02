@@ -1,5 +1,46 @@
 import { createApp } from 'vue'
-import ElementPlus from 'element-plus'
+import {
+  ElAlert,
+  ElButton,
+  ElCheckbox,
+  ElCheckboxGroup,
+  ElCollapse,
+  ElCollapseItem,
+  ElDatePicker,
+  ElDialog,
+  ElDrawer,
+  ElDropdown,
+  ElDropdownItem,
+  ElDropdownMenu,
+  ElEmpty,
+  ElForm,
+  ElFormItem,
+  ElIcon,
+  ElInput,
+  ElInputNumber,
+  ElLoading,
+  ElMenu,
+  ElMenuItem,
+  ElOption,
+  ElPagination,
+  ElProgress,
+  ElRadio,
+  ElRadioButton,
+  ElRadioGroup,
+  ElSegmented,
+  ElSelect,
+  ElSubMenu,
+  ElSwitch,
+  ElTable,
+  ElTableColumn,
+  ElTabPane,
+  ElTabs,
+  ElTag,
+  ElTimeline,
+  ElTimelineItem,
+  ElTooltip,
+  ElUpload,
+} from 'element-plus'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
 import router from './router'
@@ -7,4 +48,50 @@ import { pinia } from './stores'
 import './style.css'
 import './views/express/express-legacy.css'
 
-createApp(App).use(pinia).use(router).use(ElementPlus).mount('#app')
+const app = createApp(App)
+
+for (const component of [
+  ElAlert,
+  ElButton,
+  ElCheckbox,
+  ElCheckboxGroup,
+  ElCollapse,
+  ElCollapseItem,
+  ElDatePicker,
+  ElDialog,
+  ElDrawer,
+  ElDropdown,
+  ElDropdownItem,
+  ElDropdownMenu,
+  ElEmpty,
+  ElForm,
+  ElFormItem,
+  ElIcon,
+  ElInput,
+  ElInputNumber,
+  ElMenu,
+  ElMenuItem,
+  ElOption,
+  ElPagination,
+  ElProgress,
+  ElRadio,
+  ElRadioButton,
+  ElRadioGroup,
+  ElSegmented,
+  ElSelect,
+  ElSubMenu,
+  ElSwitch,
+  ElTable,
+  ElTableColumn,
+  ElTabPane,
+  ElTabs,
+  ElTag,
+  ElTimeline,
+  ElTimelineItem,
+  ElTooltip,
+  ElUpload,
+]) {
+  app.use(component)
+}
+
+app.use(ElLoading).use(pinia).use(router).mount('#app')

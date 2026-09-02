@@ -9,6 +9,7 @@ import {
   Key,
   Lock,
   Money,
+  OfficeBuilding,
   Operation,
   PieChart,
   Search,
@@ -20,6 +21,7 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { prefetchRoute } from '../router/viewLoaders'
 import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
@@ -96,26 +98,46 @@ async function handleLogout() {
         text-color="#8fa4c4"
         active-text-color="#ffffff"
       >
-        <ElMenuItem v-if="auth.can('dashboard.view')" index="/">
+        <ElMenuItem v-if="auth.can('dashboard.view')" index="/" @mouseenter="prefetchRoute('/')">
           <ElIcon><House /></ElIcon>
           <span>工作台</span>
         </ElMenuItem>
-        <ElMenuItem v-if="auth.can('analytics.view')" index="/analytics">
+        <ElMenuItem v-if="auth.can('analytics.view')" index="/analytics" @mouseenter="prefetchRoute('/analytics')">
           <ElIcon><DataAnalysis /></ElIcon>
           <span>经营分析</span>
         </ElMenuItem>
 
         <div class="menu-section">业务模块</div>
+        <ElMenuItem v-if="auth.can('suppliers.view')" index="/suppliers" @mouseenter="prefetchRoute('/suppliers')">
+          <ElIcon><OfficeBuilding /></ElIcon>
+          <span>供应商管理</span>
+        </ElMenuItem>
+        <ElMenuItem v-if="auth.can('operations_data.view')" index="/customers" @mouseenter="prefetchRoute('/customers')">
+          <ElIcon><User /></ElIcon>
+          <span>客户管理</span>
+        </ElMenuItem>
+        <ElMenuItem v-if="auth.can('operations_data.view')" index="/value-added" @mouseenter="prefetchRoute('/value-added')">
+          <ElIcon><Operation /></ElIcon>
+          <span>增值服务</span>
+        </ElMenuItem>
+        <ElMenuItem v-if="auth.can('operations_data.view')" index="/customer-service" @mouseenter="prefetchRoute('/customer-service')">
+          <ElIcon><Document /></ElIcon>
+          <span>客户服务管理</span>
+        </ElMenuItem>
+        <ElMenuItem v-if="auth.can('operations_data.view')" index="/short-video" @mouseenter="prefetchRoute('/short-video')">
+          <ElIcon><PieChart /></ElIcon>
+          <span>短视频管理</span>
+        </ElMenuItem>
         <ElSubMenu v-if="auth.can('express.view') || auth.can('express.run') || auth.can('express.configure')" index="express">
           <template #title>
             <ElIcon><DataLine /></ElIcon>
             <span>快递对账</span>
           </template>
-          <ElMenuItem v-if="auth.can('express.view')" index="/express"><ElIcon><House /></ElIcon><span>看板</span></ElMenuItem>
-          <ElMenuItem v-if="auth.can('express.run')" index="/express/run"><ElIcon><Operation /></ElIcon><span>运行</span></ElMenuItem>
-          <ElMenuItem v-if="auth.can('express.view')" index="/express/history"><ElIcon><Files /></ElIcon><span>历史</span></ElMenuItem>
-          <ElMenuItem v-if="auth.can('express.view')" index="/express/stats"><ElIcon><PieChart /></ElIcon><span>统计</span></ElMenuItem>
-          <ElMenuItem v-if="auth.can('express.configure')" index="/express/config"><ElIcon><Setting /></ElIcon><span>配置</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.view')" index="/express" @mouseenter="prefetchRoute('/express')"><ElIcon><House /></ElIcon><span>看板</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.run')" index="/express/run" @mouseenter="prefetchRoute('/express/run')"><ElIcon><Operation /></ElIcon><span>运行</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.view')" index="/express/history" @mouseenter="prefetchRoute('/express/history')"><ElIcon><Files /></ElIcon><span>历史</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.view')" index="/express/stats" @mouseenter="prefetchRoute('/express/stats')"><ElIcon><PieChart /></ElIcon><span>统计</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('express.configure')" index="/express/config" @mouseenter="prefetchRoute('/express/config')"><ElIcon><Setting /></ElIcon><span>配置</span></ElMenuItem>
         </ElSubMenu>
 
         <ElSubMenu v-if="auth.can('query.view')" index="query">
@@ -123,7 +145,7 @@ async function handleLogout() {
             <ElIcon><Search /></ElIcon>
             <span>数据查询</span>
           </template>
-          <ElMenuItem index="/query"><ElIcon><Document /></ElIcon><span>查询导出</span></ElMenuItem>
+          <ElMenuItem index="/query" @mouseenter="prefetchRoute('/query')"><ElIcon><Document /></ElIcon><span>查询导出</span></ElMenuItem>
         </ElSubMenu>
 
         <ElSubMenu v-if="auth.can('salary.view') || auth.can('reimbursement.view')" index="finance">
@@ -131,19 +153,19 @@ async function handleLogout() {
             <ElIcon><Money /></ElIcon>
             <span>财务模块</span>
           </template>
-          <ElMenuItem v-if="auth.can('salary.view')" index="/finance"><ElIcon><House /></ElIcon><span>模块首页</span></ElMenuItem>
-          <ElMenuItem v-if="auth.can('salary.view')" index="/salary"><ElIcon><Wallet /></ElIcon><span>员工工资</span></ElMenuItem>
-          <ElMenuItem v-if="auth.can('reimbursement.view')" index="/reimbursement"><ElIcon><Document /></ElIcon><span>报销</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('salary.view')" index="/finance" @mouseenter="prefetchRoute('/finance')"><ElIcon><House /></ElIcon><span>模块首页</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('salary.view')" index="/salary" @mouseenter="prefetchRoute('/salary')"><ElIcon><Wallet /></ElIcon><span>员工工资</span></ElMenuItem>
+          <ElMenuItem v-if="auth.can('reimbursement.view')" index="/reimbursement" @mouseenter="prefetchRoute('/reimbursement')"><ElIcon><Document /></ElIcon><span>报销</span></ElMenuItem>
         </ElSubMenu>
 
-        <ElMenuItem v-if="auth.can('storage.view')" index="/storage">
+        <ElMenuItem v-if="auth.can('storage.view')" index="/storage" @mouseenter="prefetchRoute('/storage')">
           <ElIcon><Box /></ElIcon>
           <span>仓储费</span>
         </ElMenuItem>
 
         <template v-if="auth.isSystemAdmin">
           <div class="menu-section">系统管理</div>
-          <ElMenuItem index="/access">
+          <ElMenuItem index="/access" @mouseenter="prefetchRoute('/access')">
             <ElIcon><Lock /></ElIcon>
             <span>账号与权限</span>
           </ElMenuItem>

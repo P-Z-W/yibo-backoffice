@@ -47,6 +47,22 @@ class Settings(BaseSettings):
     legacy_project_path: Path = Path(r"E:\Projects\yibo-backoffice-old")
     storage_path: Path = BACKEND_DIR / "storage"
 
+    invoice_ocr_provider: str = Field(default="baidu", validation_alias="INVOICE_OCR_PROVIDER")
+    baidu_ocr_api_key: str = Field(default="", validation_alias="BAIDU_OCR_API_KEY")
+    baidu_ocr_secret_key: str = Field(default="", validation_alias="BAIDU_OCR_SECRET_KEY")
+    invoice_ocr_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias="INVOICE_OCR_TIMEOUT_SECONDS",
+    )
+
+    @property
+    def invoice_ocr_available(self) -> bool:
+        return bool(
+            self.invoice_ocr_provider.lower() == "baidu"
+            and self.baidu_ocr_api_key
+            and self.baidu_ocr_secret_key
+        )
+
     @property
     def database_url(self) -> URL:
         return URL.create(

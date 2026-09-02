@@ -10,12 +10,50 @@ from io import BytesIO
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.comments import Comment
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_ROWS = 5000
 MAX_IMPORT_COLUMNS = 80
 PREVIEW_ROWS = 20
+
+STAFFING_INPUT_COLUMNS: tuple[str, ...] = (
+    "小组",
+    "正式工人数",
+    "最优配置",
+    "人均月产出",
+    "最优人均产出",
+    "综合分析",
+)
+STAFFING_CALCULATED_COLUMNS: tuple[str, ...] = (
+    "配置偏差",
+    "偏差比例",
+    "效率差额",
+    "效率差额占比",
+    "人均月产出净变化",
+    "人均月产出环比",
+)
+STAFFING_COLUMNS: tuple[str, ...] = (
+    "小组",
+    "正式工人数",
+    "最优配置",
+    "配置偏差",
+    "偏差比例",
+    "人均月产出",
+    "最优人均产出",
+    "效率差额",
+    "效率差额占比",
+    "人均月产出净变化",
+    "人均月产出环比",
+    "综合分析",
+)
+STAFFING_PERCENT_COLUMNS = {
+    "偏差比例",
+    "效率差额占比",
+    "人均月产出环比",
+}
 
 
 @dataclass(frozen=True)
@@ -34,37 +72,44 @@ DATASET_DEFINITIONS: tuple[DatasetDefinition, ...] = (
     DatasetDefinition(
         "shipping_orders",
         "发货单量",
-        "按团队登记当月发货单量，可由分表自动汇总到总表。",
+        "按页面月份从业务库只读统计各团队发货单量，也可上传 Excel 补充。",
         ("1-发货单量", "发货单量"),
-        ("月份", "团队名称", "发货单量", "总发货订单", "数据发货占比", "备注"),
+        ("团队名称", "发货单量", "数据发货占比", "备注"),
         ("团队名称", "发货单量"),
-        "识别“发货单量”后自动求和。",
+        "系统按运单号去重，并按已确认的状态、物流和仓库条件统计。",
         ("shipping_orders",),
     ),
     DatasetDefinition(
         "return_items",
         "退货件数",
-        "按团队登记当月退货件数，可由分表自动汇总到总表。",
+        "按页面月份从业务库只读统计各团队退货件数，也可上传 Excel 补充。",
         ("2-退货件数", "退货件数"),
-        ("月份", "团队名称", "退货件数", "备注"),
-        ("团队名称", "退货件数"),
-        "识别“退货件数”后自动求和。",
+        (
+            "团队名称",
+            "处理退货件数",
+            "拦截件扣费件数",
+            "异常件扣费件数",
+            "退货件数合计",
+            "数据退货占比",
+        ),
+        ("团队名称", "处理退货件数", "拦截件扣费件数", "异常件扣费件数"),
+        "三类退货件数按团队汇总；退货件数合计及数据退货占比由系统计算。",
         ("return_items",),
     ),
     DatasetDefinition(
         "customer_changes",
         "客户变化",
-        "登记新进、流失和意向客户，可记录名称、来源渠道和说明。",
+        "数据来自客户管理模块，按页面月份展示新进、流失和意向客户。",
         ("3-客户变化", "客户变化"),
         ("月份", "变化类型", "客户名称", "来源渠道", "数量", "备注"),
         ("变化类型",),
-        "按变化类型汇总新进、流失和意向客户；数量为空时按 1 计。",
+        "按客户管理模块的变化类型汇总；数量为空时按 1 计。",
         ("new_customers", "lost_customers", "prospective_customers"),
     ),
     DatasetDefinition(
         "supplier_changes",
         "供应商变化",
-        "维护供应商档案及当月变化，联系方式仅对经营分析权限用户展示。",
+        "数据来自供应商管理模块，按页面月份展示当月发生变化的供应商。",
         ("4-供应商变化", "供应商变化"),
         (
             "供应商名称",
@@ -76,31 +121,17 @@ DATASET_DEFINITIONS: tuple[DatasetDefinition, ...] = (
             "备注",
         ),
         ("供应商名称",),
-        "按供应商名称去重后汇总供应商数量。",
+        "按供应商管理模块当月变更记录去重后汇总供应商数量。",
         ("supplier_change",),
     ),
     DatasetDefinition(
         "staffing",
         "人员调整",
-        "按小组登记人员配置、产出和效率损失。",
+        "按页面月份上传各小组人员配置和产出，偏差、效率差额及环比由系统计算。",
         ("5-人员调整", "人员调整"),
-        (
-            "月份",
-            "小组",
-            "正式工人数",
-            "最优配置",
-            "配置偏差",
-            "偏差比例",
-            "人均月产出",
-            "最低人均产出",
-            "效率损失",
-            "效率损失占比",
-            "人均月产出变化",
-            "人均月产出环比",
-            "分析",
-        ),
+        STAFFING_COLUMNS,
         ("小组", "正式工人数"),
-        "识别“正式工人数”后自动求和。",
+        "页面月份为准；识别正式工人数后汇总，其他偏差和环比由系统统一计算。",
         ("staff_adjustment",),
     ),
     DatasetDefinition(
@@ -116,7 +147,7 @@ DATASET_DEFINITIONS: tuple[DatasetDefinition, ...] = (
     DatasetDefinition(
         "service_issues",
         "客户服务情况",
-        "登记客户投诉、异常原因、责任归属和整改状态。",
+        "数据来自客户服务管理模块，展示投诉、原因、责任和整改状态。",
         ("8-客户服务情况", "客户服务情况"),
         (
             "月份",
@@ -129,17 +160,17 @@ DATASET_DEFINITIONS: tuple[DatasetDefinition, ...] = (
             "状态",
         ),
         ("月份", "投诉大类", "问题详细描述"),
-        "作为服务问题台账展示，不直接改变总表数值。",
+        "按客户服务管理模块当月记录展示，不直接改变总表数值。",
         (),
     ),
     DatasetDefinition(
         "short_video",
         "短视频情况",
-        "登记短视频数量、类型、负责人和运营备注。",
+        "数据来自短视频管理模块，展示数量、类型、负责人和运营备注。",
         ("9-短视频情况", "短视频情况"),
         ("月份", "短视频数量", "短视频类型", "负责人", "备注"),
         ("月份", "短视频数量"),
-        "作为运营台账展示，不直接改变现有总表数值。",
+        "按短视频管理模块当月记录展示，不直接改变现有总表数值。",
         (),
     ),
 )
@@ -337,7 +368,22 @@ def summarize_rows(dataset_type: str, rows: list[dict[str, object]]) -> dict[str
         value = sum_column(rows, ("发货单量", "单量"))
         return {"shipping_orders": value} if value is not None else {}
     if dataset_type == "return_items":
-        value = sum_column(rows, ("退货件数", "退件件数"))
+        value = sum_column(rows, ("退货件数合计", "退货件数", "退件件数"))
+        if value is None:
+            component_columns = [
+                find_column(rows, (label,))
+                for label in ("处理退货件数", "拦截件扣费件数", "异常件扣费件数")
+            ]
+            if any(component_columns):
+                value = sum(
+                    (
+                        number(row.get(column)) or Decimal("0")
+                        for row in rows
+                        for column in component_columns
+                        if column is not None
+                    ),
+                    Decimal("0"),
+                )
         return {"return_items": value} if value is not None else {}
     if dataset_type == "staffing":
         value = sum_column(rows, ("正式工人数",))
@@ -394,6 +440,255 @@ def build_template(definition: DatasetDefinition) -> BytesIO:
         sheet.column_dimensions[chr(64 + index) if index <= 26 else "A"].width = max(
             14, min(28, len(column) * 2 + 4)
         )
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def build_staffing_template() -> BytesIO:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "人员调整"
+    columns = list(STAFFING_INPUT_COLUMNS)
+    sheet.append(columns)
+    sheet.append(["发货组", None, None, None, None, ""])
+    sheet.append(["售后组", None, None, None, None, ""])
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = "A1:F3"
+    sheet.sheet_view.showGridLines = False
+    widths = [20, 15, 15, 18, 18, 56]
+    header_fill = PatternFill("solid", fgColor="EAF2FF")
+    input_fill = PatternFill("solid", fgColor="FFF9E8")
+    thin_border = Border(
+        left=Side(style="thin", color="DCE6F5"),
+        right=Side(style="thin", color="DCE6F5"),
+        top=Side(style="thin", color="DCE6F5"),
+        bottom=Side(style="thin", color="DCE6F5"),
+    )
+    for column_index, (column, width) in enumerate(zip(columns, widths), start=1):
+        cell = sheet.cell(row=1, column=column_index)
+        cell.font = Font(bold=True, color="263F63")
+        cell.fill = header_fill
+        cell.border = Border(bottom=Side(style="medium", color="4D8DF7"))
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet.column_dimensions[get_column_letter(column_index)].width = width
+    for row_index in range(2, 4):
+        sheet.row_dimensions[row_index].height = 28
+        for column_index in range(1, len(columns) + 1):
+            cell = sheet.cell(row=row_index, column=column_index)
+            cell.fill = input_fill
+            cell.border = thin_border
+            cell.alignment = Alignment(
+                horizontal="left" if column_index in {1, 6} else "right",
+                vertical="center",
+                wrap_text=column_index == 6,
+            )
+        for column_index in {2, 3}:
+            sheet.cell(row=row_index, column=column_index).number_format = "#,##0.##"
+        for column_index in {4, 5}:
+            sheet.cell(row=row_index, column=column_index).number_format = "#,##0.00"
+    sheet["A1"].comment = Comment("系统按页面所选月份和小组名称匹配；模板中不再填写月份。", "系统")
+    sheet["B1"].comment = Comment("正式工人数用于月度总表汇总和配置偏差计算。", "系统")
+    sheet["D1"].comment = Comment("人均月产出按月上传表内数据，后续再维护自动取数。", "系统")
+    sheet["F1"].comment = Comment("支持填写较长的月度综合分析。", "系统")
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def build_detail_export(
+    definition: DatasetDefinition, rows: list[dict[str, object]]
+) -> BytesIO:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = definition.name[:31]
+    columns = list(definition.columns)
+    sheet.append(columns)
+    for row in rows:
+        sheet.append([row.get(column) for column in columns])
+
+    last_row = len(rows) + 1
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{last_row}"
+    sheet.row_dimensions[1].height = 28
+    sheet.sheet_view.showGridLines = False
+    header_fill = PatternFill("solid", fgColor="EAF2FF")
+    header_border = Border(bottom=Side(style="medium", color="4D8DF7"))
+    thin_border = Border(
+        left=Side(style="thin", color="DCE6F5"),
+        right=Side(style="thin", color="DCE6F5"),
+        top=Side(style="thin", color="DCE6F5"),
+        bottom=Side(style="thin", color="DCE6F5"),
+    )
+    for column_index, column in enumerate(columns, start=1):
+        cell = sheet.cell(row=1, column=column_index)
+        cell.font = Font(bold=True, color="263F63")
+        cell.fill = header_fill
+        cell.border = header_border
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet.column_dimensions[get_column_letter(column_index)].width = max(
+            14, min(32, len(column) * 2 + 6)
+        )
+    for row_index in range(2, last_row + 1):
+        sheet.row_dimensions[row_index].height = 24
+        for column_index, column in enumerate(columns, start=1):
+            cell = sheet.cell(row=row_index, column=column_index)
+            cell.border = thin_border
+            cell.alignment = Alignment(
+                vertical="center",
+                wrap_text=column == "综合分析",
+            )
+            if column in STAFFING_PERCENT_COLUMNS:
+                cell.number_format = "0.00%"
+            elif column in {"正式工人数", "最优配置", "配置偏差"}:
+                cell.number_format = "#,##0.##"
+            elif column in {
+                "人均月产出",
+                "最优人均产出",
+                "效率差额",
+                "人均月产出净变化",
+            }:
+                cell.number_format = "#,##0.00"
+        if "综合分析" in columns:
+            sheet.row_dimensions[row_index].height = 48
+
+    if "综合分析" in columns:
+        sheet.column_dimensions[get_column_letter(columns.index("综合分析") + 1)].width = 56
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def build_shipping_template(rows: list[dict[str, object]]) -> BytesIO:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "发货单量"
+    columns = ["序号", "团队名称", "发货单量", "数据发货占比", "备注"]
+    sheet.append(columns)
+
+    source_rows = rows or [{"团队名称": "", "发货单量": None, "备注": ""}]
+    last_row = len(source_rows) + 1
+    for index, row in enumerate(source_rows, start=1):
+        excel_row = index + 1
+        sheet.append(
+            [
+                index,
+                str(row.get("团队名称") or ""),
+                number(row.get("发货单量")),
+                f'=IFERROR(C{excel_row}/SUM($C$2:$C${last_row}),0)',
+                str(row.get("备注") or ""),
+            ]
+        )
+
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:E{last_row}"
+    sheet.row_dimensions[1].height = 28
+    sheet.sheet_view.showGridLines = False
+    widths = [9, 28, 16, 18, 42]
+    header_fill = PatternFill("solid", fgColor="EAF2FF")
+    header_border = Border(bottom=Side(style="medium", color="4D8DF7"))
+    thin_border = Border(
+        left=Side(style="thin", color="DCE6F5"),
+        right=Side(style="thin", color="DCE6F5"),
+        top=Side(style="thin", color="DCE6F5"),
+        bottom=Side(style="thin", color="DCE6F5"),
+    )
+    for column_index, (column, width) in enumerate(zip(columns, widths), start=1):
+        cell = sheet.cell(row=1, column=column_index)
+        cell.font = Font(bold=True, color="263F63")
+        cell.fill = header_fill
+        cell.border = header_border
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet.column_dimensions[get_column_letter(column_index)].width = width
+    for row_index in range(2, last_row + 1):
+        sheet.row_dimensions[row_index].height = 24
+        for column_index in range(1, 6):
+            cell = sheet.cell(row=row_index, column=column_index)
+            cell.border = thin_border
+            cell.alignment = Alignment(
+                horizontal="left" if column_index in {2, 5} else "center",
+                vertical="center",
+            )
+        sheet.cell(row=row_index, column=3).number_format = "#,##0"
+        sheet.cell(row=row_index, column=4).number_format = "0.00%"
+
+    sheet["A1"].comment = Comment("序号仅用于展示，上传时不参与匹配。", "系统")
+    sheet["B1"].comment = Comment("系统按团队名称匹配现有发货明细。", "系统")
+    sheet["D1"].comment = Comment("该列由发货单量自动计算，上传时系统会重新计算。", "系统")
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def build_shipping_export(
+    rows: list[dict[str, object]], columns: list[str]
+) -> BytesIO:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "发货数据"
+    export_columns = ["序号", *columns]
+    sheet.append(export_columns)
+    for index, row in enumerate(rows, start=1):
+        values: list[object] = [index]
+        for column in columns:
+            value = row.get(column)
+            if column == "数据发货占比" and value not in (None, ""):
+                value = Decimal(str(value)) / Decimal("100")
+            values.append(value)
+        sheet.append(values)
+
+    last_row = len(rows) + 1
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(export_columns))}{last_row}"
+    sheet.row_dimensions[1].height = 28
+    sheet.sheet_view.showGridLines = False
+    width_map = {
+        "序号": 9,
+        "团队名称": 28,
+        "发货单量": 16,
+        "数据发货占比": 18,
+        "备注": 42,
+    }
+    header_fill = PatternFill("solid", fgColor="EAF2FF")
+    header_border = Border(bottom=Side(style="medium", color="4D8DF7"))
+    thin_border = Border(
+        left=Side(style="thin", color="DCE6F5"),
+        right=Side(style="thin", color="DCE6F5"),
+        top=Side(style="thin", color="DCE6F5"),
+        bottom=Side(style="thin", color="DCE6F5"),
+    )
+    for column_index, column in enumerate(export_columns, start=1):
+        cell = sheet.cell(row=1, column=column_index)
+        cell.font = Font(bold=True, color="263F63")
+        cell.fill = header_fill
+        cell.border = header_border
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet.column_dimensions[get_column_letter(column_index)].width = width_map[column]
+    for row_index in range(2, last_row + 1):
+        sheet.row_dimensions[row_index].height = 24
+        for column_index, column in enumerate(export_columns, start=1):
+            cell = sheet.cell(row=row_index, column=column_index)
+            cell.border = thin_border
+            cell.alignment = Alignment(
+                horizontal=(
+                    "center"
+                    if column == "序号"
+                    else "left"
+                    if column in {"团队名称", "备注"}
+                    else "right"
+                ),
+                vertical="center",
+            )
+            if column == "发货单量":
+                cell.number_format = "#,##0"
+            elif column == "数据发货占比":
+                cell.number_format = "0.00%"
+
     buffer = BytesIO()
     workbook.save(buffer)
     buffer.seek(0)

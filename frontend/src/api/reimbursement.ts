@@ -14,9 +14,37 @@ export interface ReimbursementAttachment {
   original_name: string
   content_type: string
   size_bytes: number
+  document_type: 'invoice' | 'voucher'
   url: string
   duplicate?: boolean
   created_at?: string
+  invoice?: ReimbursementInvoice | null
+}
+
+export interface ReimbursementInvoice {
+  id: number
+  recognition_status: 'pending' | 'success' | 'confirmed' | 'needs_review' | 'failed' | 'unconfigured'
+  recognition_provider: string
+  recognition_message: string
+  recognized_entity_name: string
+  recognized_tax_number: string
+  recognized_amount: number | null
+  entity_name: string
+  tax_number: string
+  amount: number | null
+  invoice_code: string
+  invoice_number: string
+  invoice_date: string
+  manually_edited: boolean
+  recognized_at: string
+}
+
+export interface ReimbursementEntity {
+  id: number
+  name: string
+  tax_number: string
+  is_default: boolean
+  is_active: boolean
 }
 
 export interface ApprovalRecord {
@@ -36,12 +64,18 @@ export interface ReimbursementRecord {
   applicant_id: number
   applicant_name: string
   team: string
+  entity_name: string
+  tax_number: string
   status: string
   status_label: string
   total_amount: number
   item_count: number
   item_summary: string
   attachment_count: number
+  invoice_count: number
+  invoice_amount: number
+  invoice_amount_difference: number
+  invoice_issue_count: number
   note: string
   finance_approval_required: boolean
   exported: boolean
@@ -60,6 +94,8 @@ export interface ReimbursementRecord {
 export interface ReimbursementPayload {
   applicant_name: string
   team: string
+  entity_name: string
+  tax_number: string
   note: string
   items: ReimbursementItem[]
 }
@@ -77,6 +113,9 @@ export interface ReimbursementListResponse {
     finance_approval_enabled: boolean
     teams: string[]
     expense_categories: string[]
+    entities: ReimbursementEntity[]
+    invoice_ocr_available: boolean
+    invoice_ocr_provider: string
   }
   permissions: { can_configure: boolean; can_export: boolean }
 }
@@ -85,6 +124,8 @@ export interface BatchImportClaimPreview {
   group_key: string
   applicant_name: string
   team: string
+  entity_name: string
+  tax_number: string
   note: string
   item_count: number
   total_amount: number
@@ -185,14 +226,56 @@ export async function importBatchReimbursements(file: File, submit: boolean) {
   ).data
 }
 
-export async function uploadReimbursementAttachment(id: number, file: File) {
+export async function uploadReimbursementAttachment(
+  id: number,
+  file: File,
+  documentType: 'invoice' | 'voucher' = 'voucher',
+) {
   const data = new FormData()
   data.append('file', file)
+  data.append('document_type', documentType)
   return (
     await http.post<ReimbursementAttachment>(`/reimbursements/${id}/attachments`, data, {
       timeout: 120000,
     })
   ).data
+}
+
+export async function updateReimbursementInvoice(
+  id: number,
+  invoiceId: number,
+  payload: { entity_name: string; tax_number: string; amount: number | null },
+) {
+  return (
+    await http.put<ReimbursementAttachment>(`/reimbursements/${id}/invoices/${invoiceId}`, payload)
+  ).data
+}
+
+export async function retryReimbursementInvoiceRecognition(id: number, invoiceId: number) {
+  return (
+    await http.post<ReimbursementAttachment>(
+      `/reimbursements/${id}/invoices/${invoiceId}/recognize`,
+    )
+  ).data
+}
+
+export async function getReimbursementEntities(includeInactive = false) {
+  return (
+    await http.get<ReimbursementEntity[]>('/reimbursements/entities', {
+      params: { include_inactive: includeInactive },
+    })
+  ).data
+}
+
+export async function createReimbursementEntity(payload: Omit<ReimbursementEntity, 'id'>) {
+  return (await http.post<ReimbursementEntity>('/reimbursements/entities', payload)).data
+}
+
+export async function updateReimbursementEntity(
+  id: number,
+  payload: Omit<ReimbursementEntity, 'id'>,
+) {
+  return (await http.put<ReimbursementEntity>(`/reimbursements/entities/${id}`, payload)).data
 }
 
 export async function deleteReimbursementAttachment(id: number, attachmentId: number) {

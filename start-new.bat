@@ -24,10 +24,9 @@ if errorlevel 1 (
 cd /d "%~dp0"
 
 start "Yibo New Backend" /min cmd /c "cd /d ""%~dp0backend"" && .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
-rem Keep the frontend reachable from other computers on the local network.
-rem These explicit arguments prevent an inherited/default loopback host from
-rem overriding the LAN-safe values in vite.config.ts.
-start "Yibo New Frontend" /min cmd /c "cd /d ""%~dp0frontend"" && npm.cmd run dev -- --host 0.0.0.0 --port 5000"
+rem Build once and serve optimized static assets. Developers can still run
+rem "npm run dev" manually when hot-module replacement is needed.
+start "Yibo New Frontend" /min cmd /c "cd /d ""%~dp0frontend"" && npm.cmd run build && npm.cmd run preview"
 
 echo New system is starting:
 echo   Frontend on this computer: http://127.0.0.1:5000

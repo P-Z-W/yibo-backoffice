@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AppLayout from '../layouts/AppLayout.vue'
 import { pinia } from '../stores'
 import { useAuthStore } from '../stores/auth'
+import { viewLoaders } from './viewLoaders'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -9,19 +10,19 @@ const router = createRouter({
     {
       path: '/login',
       name: 'login',
-      component: () => import('../views/LoginView.vue'),
+      component: viewLoaders.login,
       meta: { title: '登录' },
     },
     {
       path: '/change-password',
       name: 'change-password',
-      component: () => import('../views/ChangePasswordView.vue'),
+      component: viewLoaders.changePassword,
       meta: { requiresAuth: true, title: '修改密码' },
     },
     {
       path: '/forbidden',
       name: 'forbidden',
-      component: () => import('../views/ForbiddenView.vue'),
+      component: viewLoaders.forbidden,
       meta: { requiresAuth: true, title: '无权访问' },
     },
     {
@@ -32,78 +33,112 @@ const router = createRouter({
         {
           path: '',
           name: 'dashboard',
-          component: () => import('../views/DashboardView.vue'),
+          component: viewLoaders.dashboard,
           meta: { title: '工作台', permission: 'dashboard.view' },
         },
         {
           path: 'analytics',
           name: 'analytics',
-          component: () => import('../views/AnalyticsView.vue'),
+          component: viewLoaders.analytics,
           meta: { title: '经营分析', permission: 'analytics.view' },
+        },
+        {
+          path: 'suppliers',
+          name: 'suppliers',
+          component: viewLoaders.suppliers,
+          meta: { title: '供应商管理', permission: 'suppliers.view' },
+        },
+        {
+          path: 'customers',
+          name: 'customers',
+          component: viewLoaders.operationRecords,
+          props: { dataset: 'customer_changes' },
+          meta: { title: '客户管理', permission: 'operations_data.view' },
+        },
+        {
+          path: 'value-added',
+          name: 'value-added',
+          component: viewLoaders.operationRecords,
+          props: { dataset: 'value_added' },
+          meta: { title: '增值服务', permission: 'operations_data.view' },
+        },
+        {
+          path: 'customer-service',
+          name: 'customer-service',
+          component: viewLoaders.operationRecords,
+          props: { dataset: 'service_issues' },
+          meta: { title: '客户服务管理', permission: 'operations_data.view' },
+        },
+        {
+          path: 'short-video',
+          name: 'short-video',
+          component: viewLoaders.operationRecords,
+          props: { dataset: 'short_video' },
+          meta: { title: '短视频管理', permission: 'operations_data.view' },
         },
         {
           path: 'express',
           name: 'express-dashboard',
-          component: () => import('../views/express/ExpressDashboardView.vue'),
+          component: viewLoaders.expressDashboard,
           meta: { title: '快递对账 · 看板', permission: 'express.view' },
         },
         {
           path: 'express/run',
           name: 'express-run',
-          component: () => import('../views/express/ExpressRunView.vue'),
+          component: viewLoaders.expressRun,
           meta: { title: '快递对账 · 运行', permission: 'express.run' },
         },
         {
           path: 'express/history',
           name: 'express-history',
-          component: () => import('../views/express/ExpressHistoryView.vue'),
+          component: viewLoaders.expressHistory,
           meta: { title: '快递对账 · 历史', permission: 'express.view' },
         },
         {
           path: 'express/stats',
           name: 'express-stats',
-          component: () => import('../views/express/ExpressStatsView.vue'),
+          component: viewLoaders.expressStats,
           meta: { title: '快递对账 · 统计', permission: 'express.view' },
         },
         {
           path: 'express/config',
           name: 'express-config',
-          component: () => import('../views/express/ExpressConfigView.vue'),
+          component: viewLoaders.expressConfig,
           meta: { title: '快递对账 · 配置', permission: 'express.configure' },
         },
         {
           path: 'query',
           name: 'query-export',
-          component: () => import('../views/QueryExportView.vue'),
+          component: viewLoaders.queryExport,
           meta: { title: '数据查询 · 查询导出', permission: 'query.view' },
         },
         {
           path: 'salary',
           name: 'salary',
-          component: () => import('../views/SalaryView.vue'),
+          component: viewLoaders.salary,
           meta: { title: '员工工资', permission: 'salary.view' },
         },
         {
           path: 'finance',
-          component: () => import('../views/PlaceholderView.vue'),
+          component: viewLoaders.placeholder,
           props: { title: '财务模块', description: '老系统仅有入口，本次已迁移为新版扩展位置。' },
           meta: { title: '财务模块', permission: 'salary.view' },
         },
         {
           path: 'reimbursement',
-          component: () => import('../views/ReimbursementView.vue'),
+          component: viewLoaders.reimbursement,
           meta: { title: '报销', permission: 'reimbursement.view' },
         },
         {
           path: 'storage',
-          component: () => import('../views/PlaceholderView.vue'),
+          component: viewLoaders.placeholder,
           props: { title: '仓储费', description: '老系统为规划模块，本次保留新版扩展位置。' },
           meta: { title: '仓储费', permission: 'storage.view' },
         },
         {
           path: 'access',
           name: 'access-management',
-          component: () => import('../views/AccessManagementView.vue'),
+          component: viewLoaders.access,
           meta: { title: '账号与权限', systemAdminOnly: true },
         },
       ],

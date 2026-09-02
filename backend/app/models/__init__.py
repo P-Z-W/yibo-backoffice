@@ -9,6 +9,12 @@ from app.models.analytics import (
     MonthlyMetric,
     MonthlyReview,
 )
+from app.models.operation_record import (
+    CustomerChangeRecord,
+    CustomerServiceRecord,
+    ShortVideoRecord,
+    ValueAddedRecord,
+)
 from app.models.operations import (
     ExpressCarrier,
     ExpressChargePrice,
@@ -24,8 +30,11 @@ from app.models.reimbursement import (
     Reimbursement,
     ReimbursementApproval,
     ReimbursementAttachment,
+    ReimbursementEntity,
+    ReimbursementInvoice,
     ReimbursementItem,
 )
+from app.models.supplier import Supplier, SupplierChange
 from app.models.user import AuditLog, Permission, Role, RolePermission, User, UserRole
 
 __all__ = [
@@ -45,11 +54,19 @@ __all__ = [
     "Reimbursement",
     "ReimbursementApproval",
     "ReimbursementAttachment",
+    "ReimbursementEntity",
+    "ReimbursementInvoice",
     "ReimbursementItem",
     "Role",
     "RolePermission",
     "SalaryRecord",
     "StoredFile",
+    "Supplier",
+    "SupplierChange",
+    "CustomerChangeRecord",
+    "CustomerServiceRecord",
+    "ShortVideoRecord",
+    "ValueAddedRecord",
     "SystemSetting",
     "TeamExpressPrice",
     "TeamSpecialRule",
